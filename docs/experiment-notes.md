@@ -191,3 +191,14 @@ v26 실제회차 검수: Python first4 계획은 existing상위 reverseimpact가
 TS8개는2생성6재사용 후7PASS/1HOLD였다. 조건부표준overlap책임은복원됐지만상위OUTPUT에별도callback의내부식이재인용돼기존비중복기준HOLD다. Button은1생성 후독립PASS로imported값INPUT·필수타입·분기·후행rest제외키와남는키의조건부효과모순을해결했다. JSX전체언어/외부프로젝트의통과를추론하지않는다. SQL추가1회승인은질문중이며새SQL호출은없다.
 
 확대누적108실호출·입력619344·출력93574·추정USD0.100579925, 초기확보분포함USD0.12988596다. 초기미확보3건과Work개발사용량은제외·청구실측아니다. 남은공유효과누락과callback식중복의최소다음제안을준비했지만전체완료는아니다.
+## v27 최소 출력 소유 보완과 제한된 재검증
+
+실제 그룹의확인된externalcall마다 suppliedchildOUTPUT의항목번호와actualcallsite/resultUse만derived로연결했다. source/하위INPUT·PROCESS·OUTPUT·uncertainty 전문을보존하고mixed return/effect의observable부분을callerOUTPUT에서빼지않도록주의한다. 한국어문장의semantic매칭/target명하드코드/기존child글재복사/새효과추론은없다. 조건부stdcollection노드만OUTPUT에inlinechildbody식인용을금지하고Boolean/earlyfalse책임을유지했다. 검증기와schema는유지한다.
+
+무료335검사·독립최종공개검수통과. actual45중43과원래29·SQLrequest는byte동일이며관측된group/TS1요청만변경했다. 실제현재child전문을포함한group7102와TS4892,SQL15988/16000을확인했다. 미래3memberSCC에아직없는parent뜻을가정해fit을보장하지않는다.
+
+TS8개는2생성6재사용후7PASS/1HOLD다. OUTPUT의inlineformula는해결했으나같은formula가PROCESS/childUses로옮겨져원래하위비중복기준HOLD를유지한다. 의미가맞는표준조건부책임·earlyfalse·근거·하위hash는통과한부분으로보존한다. 같은문제에추가유료호출을자동확대하지않고소유표시의다음원인을무료진단한다.
+
+Python20승인은소진돼새group을유료검증하지않았다. 보류1+미생성6그룹을추가총최대7회·입력16000/출력2000·batch최대5·retry0·추정최대USD0.021의별도pending승인안으로준비했고한도를넘는actualfullchild입력은전송전에멈춘다. 기존소진승인을초기화하지않는다. SQL한국어보완추가1회도별도pending이며실행0이다.
+
+확대누적110실호출·입력629731·출력94772·추정USD0.102085575, 초기확보분포함USD0.13139161다. 초기미확보3건·Work개발사용량제외·청구실측아니다. 전체목표는진행중이며미해결품질을검증완료로표시하지않는다.

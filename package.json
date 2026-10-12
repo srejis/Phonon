@@ -1,0 +1,25 @@
+{
+  "name": "phonon",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Local evidence-backed hierarchical code explanations",
+  "scripts": {
+    "preflight": "node scripts/preflight.mjs",
+    "test": "node --test test/*.test.mjs",
+    "ui": "node src/ui.mjs",
+    "mcp": "node src/mcp.mjs",
+    "cli": "node cli.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@openai/agents": "0.20.0",
+    "js-tiktoken": "1.0.21",
+    "node-sql-parser": "5.4.0",
+    "openai": "7.32.0",
+    "tree-sitter-wasms": "0.1.13",
+    "typescript": "7.0.2",
+    "web-tree-sitter": "0.20.8",
+    "zod": "4.6.6"
+  }
+}

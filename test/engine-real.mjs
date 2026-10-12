@@ -1,0 +1,46 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {ROOT} from '../src/parser.mjs';
+import {registerProject,requestAnalysis,waitForJob,getStatus,getNode} from '../src/engine.mjs';
+const root=path.join(ROOT,'.local','live-fixtures');fs.mkdirSync(root,{recursive:true});
+const results=[];const plan={maxTotalCalls:13,maxInputTokens:3000,maxOutputTokens:1000,purpose:'H3 integration: actual two-node code, conditional hierarchy, cache change/line move/failure, one small unit per remaining language'};
+fs.writeFileSync(path.join(ROOT,'.local','integration-plan.json'),JSON.stringify(plan,null,2));
+async function run(id,maxCalls,files){requestAnalysis(id,{maxCalls,files});const job=await waitForJob(id);results.push({id,job});
+ fs.writeFileSync(path.join(ROOT,'.local','integration-results.json'),JSON.stringify(results,null,2));
+ if(job.status==='api_blocked'){console.log(JSON.stringify(job));process.exit(2);}assert.equal(job.status,'completed',JSON.stringify(job));return getStatus(id).latest;
+}
+const actualRoot=process.argv[2],actualFile=process.argv[3]??'test_code.py';
+if(!actualRoot)throw new Error('Provide a reviewed read-only project directory and optional two-node add/caller file. Live tests are paid and require an active API authorization.');
+const actual=registerProject('First real Python example',actualRoot);
+let snapshot=await run(actual.id,2,[actualFile]);
+assert.equal(snapshot.graph.nodes.length,2);assert.equal(snapshot.generated.length,2);
+const top=snapshot.graph.nodes.find(n=>n.name==='top_level');assert.equal(snapshot.meanings[top.id].input.length,0);
+assert.match(snapshot.meanings[top.id].output.join(' '),/출력|stdout/);assert.doesNotMatch(snapshot.meanings[top.id].childUses.map(c=>c.description).join(' '),/a\s*\+\s*b|2\s*\+\s*3/);
+const conditionalDir=path.join(root,'conditional');fs.mkdirSync(conditionalDir,{recursive:true});
+const conditionalFile=path.join(conditionalDir,'calc.py');
+const base='def clamp(value):\n    if value < 0:\n        return 0\n    return value\n\ndef scale(value, factor):\n    bounded = clamp(value)\n    if factor > 1:\n        return bounded * factor\n    return bounded\n';
+fs.writeFileSync(conditionalFile,base);
+const conditional=registerProject('Conditional hierarchy',conditionalDir);
+snapshot=await run(conditional.id,2);
+const parent=snapshot.graph.nodes.find(n=>n.name==='scale'),leaf=snapshot.graph.nodes.find(n=>n.name==='clamp');
+const parentMeaning=snapshot.meanings[parent.id],leafMeaning=snapshot.meanings[leaf.id];
+assert.match(leafMeaning.process.join(' '),/<\s*0|0.*미만|음수/);assert.match(parentMeaning.process.join(' '),/>\s*1|1.*크|1.*초과/);
+assert.match(parentMeaning.process.join(' '),/\*|곱/);assert.equal(parentMeaning.childUses[0].childId,leaf.id);
+assert.doesNotMatch(parentMeaning.process.concat(parentMeaning.childUses.map(c=>c.description)).join(' '),/<\s*0|음수|0.*미만/);
+const before=snapshot.completedAt;
+fs.writeFileSync(conditionalFile,'\n\n\n'+base);
+snapshot=await run(conditional.id,0);assert.equal(snapshot.generated.length,0);assert.equal(snapshot.reused.length,2);
+assert.ok(getNode(conditional.id,leaf.id).meaning.evidence.some(e=>e.line>=4));
+fs.writeFileSync(conditionalFile,base.replace('return 0','return 1'));
+snapshot=await run(conditional.id,2);assert.equal(snapshot.generated.length,2);
+const good=snapshot.completedAt;
+fs.writeFileSync(conditionalFile,'def invalid(:\n');requestAnalysis(conditional.id,{maxCalls:0});const failed=await waitForJob(conditional.id);
+assert.equal(failed.status,'failed');assert.equal(getStatus(conditional.id).latest.completedAt,good);assert.equal(getStatus(conditional.id).stale,true);fs.writeFileSync(conditionalFile,base.replace('return 0','return 1'));
+const languages={ts:'export function double(value: number) { return value * 2; }',js:'function double(value) { return value * 2; }',tsx:'export function Label({name}: {name: string}) { return <span>{name}</span>; }',jsx:'function Label({name}) { return <span>{name}</span>; }',html:'<section id="welcome"><h1>Hello</h1><a href="/start">Start</a></section>',css:'.card { display: grid; gap: 12px; }',sql:'SELECT id, amount * 2 AS doubled FROM orders WHERE amount > 10;'};
+for(const [ext,source] of Object.entries(languages)){
+ const dir=path.join(root,ext);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'sample.'+ext),source);
+ const project=registerProject('Language '+ext,dir);const s=await run(project.id,1);assert.equal(s.graph.nodes.length,1);assert.equal(s.generated.length,1);
+ console.log(JSON.stringify({language:ext,node:s.graph.nodes[0].name,meaning:Object.values(s.meanings)[0]},null,2));
+}
+console.log(JSON.stringify({status:'live integration checks passed',plan,results},null,2));

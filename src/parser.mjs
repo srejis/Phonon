@@ -154,6 +154,55 @@ function ownedSourceChecklists(ast,node,bindingInfo,language,source,top=false){
  const own=n=>n.startIndex>=ast.startIndex&&n.endIndex<=ast.endIndex&&point(n).line>0&&point(n).endLine>0;
  const site=n=>({...point(n),source:n.text});
  const resolve=(at,name)=>bindingInfo.resolve(bindingInfo.at.get(astKey(at))??bindingInfo.moduleScope,name);
+
+ function mutationOrEscape(name,binding,from,to){
+  const evidence=[];
+  walk(ast,n=>{
+   if(n.startIndex<from||n.startIndex>=to||n.type!=='identifier'||n.text!==name)return;
+   if(resolve(n,name).binding!==binding)return;
+   let parent=n.parent,container=parent;
+   while(container&&['member_expression','subscript_expression','parenthesized_expression'].includes(container.type))container=container.parent;
+   const write=['assignment_expression','augmented_assignment_expression','update_expression'].includes(container?.type)&&((container.childForFieldName('left')??container.childForFieldName('argument'))?.startIndex<=n.startIndex&&(container.childForFieldName('left')??container.childForFieldName('argument'))?.endIndex>=n.endIndex);
+   const deleted=container?.type==='unary_expression'&&container.children.some(c=>c.text==='delete');
+   const invoked=container?.type==='call_expression'&&container.childForFieldName('function')?.startIndex<=n.startIndex&&container.childForFieldName('function')?.endIndex>=n.endIndex;
+   const objectRead=['member_expression','subscript_expression'].includes(parent?.type)&&parent.childForFieldName('object')?.startIndex===n.startIndex;
+   const spreadCopy=parent?.type==='spread_element';
+   if(write||deleted||invoked||(!objectRead&&!spreadCopy))evidence.push({...site(n),reason:write?'write':deleted?'delete':invoked?'method_call':'escape_or_unproved_use'});
+  });
+  return evidence;
+ }
+ function arrayParameter(identifier,at){
+  if(identifier?.type!=='identifier')return null;
+  const r=resolve(at,identifier.text),definition=bindingInfo.declarationSources.get(r.binding);
+  if(r.status==='candidate'||r.binding?.kind!=='parameter'||definition?.startIndex!==ast.startIndex)return null;
+  const parameter=definition.childForFieldName('parameters')?.namedChildren.find(p=>patternNames(p).includes(identifier.text)),annotation=parameter?.childForFieldName('type')?.text;
+  if(!annotation||!/^:\s*(?:readonly\s+)?(?:[A-Za-z_$][\w$]*\[\]|Array<[^<>]+>)$/.test(annotation))return null;
+  return {binding:r.binding,name:identifier.text,annotation,site:site(parameter)};
+ }
+ const collection=[];
+ function collectionFor(call){
+  const fn=call.childForFieldName('function'),receiver=fn?.childForFieldName('object');
+  if(fn?.type!=='member_expression'||fn.childForFieldName('property')?.text!=='some')return;
+  const array=arrayParameter(receiver,call),callback=call.childForFieldName('arguments')?.namedChildren;
+  if(!array||callback?.length!==1||callback[0].type!=='arrow_function')return;
+  const arrow=callback[0],parameterNodes=arrow.childForFieldName('parameters')?.namedChildren??[arrow.childForFieldName('parameter')].filter(Boolean);
+  if(parameterNodes.length!==1)return;const parameter=parameterNodes[0];
+  const ordinary=parameter.type==='identifier'||parameter.type==='required_parameter'&&parameter.childForFieldName('pattern')?.type==='identifier'&&!parameter.childForFieldName('value');
+  if(!ordinary)return;
+  const params=patternNames(parameter),body=arrow.childForFieldName('body'),has=body?.childForFieldName('function');
+  if(params.length!==1||body?.type!=='call_expression'||has?.type!=='member_expression'||has.childForFieldName('property')?.text!=='has')return;
+  const value=body.childForFieldName('arguments')?.namedChildren,setId=has.childForFieldName('object');
+  if(value?.length!==1||value[0].type!=='identifier'||value[0].text!==params[0]||setId?.type!=='identifier')return;
+  const resolved=resolve(has,setId.text),declaration=bindingInfo.declarationSources.get(resolved.binding),construct=declaration?.childForFieldName('value');
+  if(resolved.status==='candidate'||resolved.binding?.kind!=='const'||!declaration||!own(declaration)||declaration.endIndex>=call.startIndex||construct?.type!=='new_expression')return;
+  const ctor=construct.childForFieldName('constructor'),args=construct.childForFieldName('arguments')?.namedChildren;
+  if(ctor?.type!=='identifier'||ctor.text!=='Set'||resolve(construct,'Set').binding||args?.length!==1||!arrayParameter(args[0],construct))return;
+  if(mutationOrEscape(setId.text,resolved.binding,declaration.endIndex,call.startIndex).length||mutationOrEscape(array.name,array.binding,ast.childForFieldName('parameters').endIndex,call.startIndex).length)return;
+  let overwritten=false,root=ast;while(root.parent)root=root.parent;
+  walk(root,n=>{if(!['assignment_expression','augmented_assignment_expression','update_expression','unary_expression'].includes(n.type))return;const left=n.childForFieldName('left')??n.childForFieldName('argument');if(left&&/^(?:Set|Array)\.prototype(?:\.|\[)/.test(left.text))overwritten=true;});
+  if(overwritten)return;
+  collection.push({call:site(call),constructor:site(construct),arrayReceiver:{name:array.name,annotation:array.annotation,site:array.site},setReceiver:setId.text,callback:site(arrow),standardSources:['https://tc39.es/ecma262/multipage/keyed-collections.html#sec-set-iterable','https://tc39.es/ecma262/multipage/keyed-collections.html#sec-set.prototype.has','https://tc39.es/ecma262/multipage/indexed-collections.html#sec-array.prototype.some'],conditional:true});
+ }
  function restFor(expression,at){
   if(expression?.type!=='identifier')return null;
   const resolved=resolve(at,expression.text),declaration=bindingInfo.declarationSources.get(resolved.binding);
@@ -166,12 +215,14 @@ function ownedSourceChecklists(ast,node,bindingInfo,language,source,top=false){
    const key=c.childForFieldName('key')??c.childForFieldName('left')??c;
    return {source:key.text,computed:key.type==='computed_property_name'};
   });
-  return {...site(declaration),pattern:pattern.text,valueSource:declaration.childForFieldName('value')?.text??null,scope:resolved.scope?.name??null,excludedKeys};
+  const threats=mutationOrEscape(expression.text,resolved.binding,declaration.endIndex,at.startIndex);
+  return {...site(declaration),pattern:pattern.text,valueSource:declaration.childForFieldName('value')?.text??null,scope:resolved.scope?.name??null,excludedKeys,exclusionProof:{status:threats.length?'unknown':'fresh_rest_no_observed_mutation_or_escape',evidence:threats}};
  }
  walk(ast,n=>{
   if((top&&(definitions.has(n.type)||isClass(n)))||(n!==ast&&(definitions.has(n.type)||isClass(n))))return;
   if(!own(n))return;
 
+  if(['typescript','tsx','javascript'].includes(language)&&n.type==='call_expression')collectionFor(n);
   if(language==='python'&&['if_statement','while_statement'].includes(n.type)){
    const condition=n.childForFieldName('condition');
    if(condition)walk(condition,comparison=>{
@@ -190,12 +241,17 @@ function ownedSourceChecklists(ast,node,bindingInfo,language,source,top=false){
    const parts=n.namedChildren.filter(c=>c.type==='jsx_attribute'||c.type==='jsx_expression');
    if(parts.some(c=>c.namedChildren[0]?.type==='spread_element')){
     const properties=parts.map((part,index)=>{const spread=part.namedChildren[0];
-     if(spread?.type==='spread_element'){const expression=spread.namedChildren[0];return {index,kind:'spread',...site(part),expression:expression?.text??'',restBinding:restFor(expression,n)};}
+     if(spread?.type==='spread_element'){const expression=spread.namedChildren[0];return {index,kind:'spread',...site(part),expression:expression?.text??'',restBinding:restFor(expression,part)};}
      return {index,kind:'explicit',...site(part),name:part.namedChildren[0]?.text??'',valueSource:part.namedChildren.slice(1).map(c=>c.text).join('')};
     });
     let returnAst=n.parent;while(returnAst&&!definitions.has(returnAst.type)&&returnAst.type!=='return_statement')returnAst=returnAst.parent;
     const element=n.parent,children=element?.type==='jsx_element'?element.namedChildren.filter(c=>!['jsx_opening_element','jsx_closing_element'].includes(c.type)).map(site):[];
-    jsx.push({...point(n),tag:n.childForFieldName('name')?.text??n.namedChildren[0]?.text??'',openingSource:n.text,properties,children,returnSite:returnAst?.type==='return_statement'&&own(returnAst)?point(returnAst):null});
+    const propSpreadEffects=properties.filter(p=>p.kind==='explicit').flatMap(prop=>properties.filter(spread=>spread.kind==='spread'&&spread.index>prop.index).map(spread=>{
+     const binding=spread.restBinding,keys=binding?.excludedKeys??[],known=keys.filter(k=>!k.computed).map(k=>/^[A-Za-z_$][\w$-]*$/.test(k.source)?k.source:/^['"][A-Za-z_$][\w$-]*['"]$/.test(k.source)?k.source.slice(1,-1):null),proven=binding?.exclusionProof?.status==='fresh_rest_no_observed_mutation_or_escape';
+     const status=!proven?'unknown':known.includes(prop.name)?'excluded':keys.some(k=>k.computed)||known.some(k=>k===null)?'unknown':'remaining_may_override';
+     return {explicitIndex:prop.index,prop:prop.name,line:prop.line,spreadIndex:spread.index,spreadLine:spread.line,status};
+    }));
+    jsx.push({...point(n),tag:n.childForFieldName('name')?.text??n.namedChildren[0]?.text??'',openingSource:n.text,properties,propSpreadEffects,children,returnSite:returnAst?.type==='return_statement'&&own(returnAst)?point(returnAst):null});
    }
   }
   if(['javascript','typescript','tsx'].includes(language)){
@@ -223,6 +279,7 @@ function ownedSourceChecklists(ast,node,bindingInfo,language,source,top=false){
    html.push({...point(n),tag:n.namedChildren.find(c=>c.type==='tag_name')?.text??'',openingSource:n.text,attributes,texts});
   }
  },n=>n!==ast&&(definitions.has(n.type)||isClass(n))||top&&(definitions.has(n.type)||isClass(n)));
+ if(collection.length)result.standardCollectionChecklist=collection;
  if(literalGuards.size)result.localLiteralGuardChecklist=[...literalGuards.values()];
  if(jsx.length)result.jsxPropChecklist=jsx;if(writes.length)result.writeChecklist=writes;if(optional.length)result.optionalAccessChecklist=optional;if(html.length)result.htmlDeclarationChecklist=html;
  return result;

@@ -178,3 +178,16 @@ TSX재검증은 필수필드·제외키를복원했지만 기존의 importedvalu
 SQL출력4000은HTTP200/completed·출력3164로끝까지응답했으나두process항목이한국어prose없이code목록만제시해languagegate에서quality_failed다. 새정상meaning/snapshot으로승격하지않고실패원문을보존했다. 별도원본내용진단에서는기존주요제약·기본값·복합키누락이복원됐지만언어검증실패를면제하지않았다. SQL승인최초1+추가2000 1+추가4000 1은모두사용했다. 후처리번역/prefix수리·자동재호출·원본SQL/DB실행은없다.
 
 확대누적100실호출·입력565578·출력85761·추정USD0.090352325, 초기확보분포함USD0.11965836. 초기미확보3건은제외하며청구실측이아니다. Work개발사용량과SDK실험사용량을합산하지않는다. 실제코드로관측된남은누락만최소보완준비중이며전체요구완료가아니다.
+
+## v26 실제 정보 역할 보완·무료 검증
+
+관측된 Python queried-state/확인된 receiver-child INPUT 역할과 순환 함수의 captured/module 입력·local 중간값·공유 효과 OUTPUT을 보완했다. 기존 Python module-read 계산을 공용 helper로 분리했고 실행 조건 fingerprint에 포함했다. 새 관계·값·runtime 타입·실행 성공을 만들지 않는다. JSX는 source에서 확인한 fresh-rest 제외키와 후행spread의 조건부 영향 표를 제공하며 변이·escape·불확정키는 unknown으로 유지한다. TS 표준 collection 주의는 source-proven constructor/배열 선언/ordinary callback 조합에 한정하고 실제 값의 선언 준수·표준 구현 미교체를 조건으로 둔다. SQL 각 항목의 한국어 서술을 요구하며 원문 식별자/리터럴과 검증기를 유지한다.
+
+무료 전체331검사 및 최종 독립 공개diff 검수를 통과했다. 기존normal29 요청은 exactbyte동일, 별도actual45중38동일·7변경이고 source/calls/references/기존actualchild 전문은 유지했다. 변경에는 기존PASS Python2개도 포함하며 재검증 없이 최신 품질PASS로 승격하지 않는다. 최종 SQL19문장 전체 wire 입력 추정15988/16000이며 output4000은 별도 배정·승인과 구분한다. 3member SCC의 미래 actualparent/child 전체 입력은 아직 미확정이다.
+
+v26 동결 뒤 Python은 기존 승인20회중잔여5 안에서 first4→독립 원본검수→의존1 순서로 배정했다. 후속 SDK 생성 및 품질 판정은 별도 이력으로 기록한다. 추가 SQL1회는 과거소진3회와 별개로 승인 질문 중이며 승인전 실행하지 않는다. API0 무료검사와 SDK실호출을 섞지 않고 기존 실패·stale 결과를 보존한다. 전체 확대·최종인계가 완료된 것은 아니다.
+v26 실제회차 검수: Python first4 계획은 existing상위 reverseimpact가 포함되어 실제 direct/add/자기순환visit/탐색의4호출 후 추가예산 요구로 중단됐다. 진단보다visit가먼저처리된 메인배치예측 차이는기록했고 원래승인20 범위·max4를초과하지않았다. 정상snapshot은보존됐으며 call.inputHash와 cache.requestHash의유일일치4로새후보를분리해검수했다. 하위direct/add를먼저PASS확인한뒤visit를검수했고 후보는3PASS/1HOLD였다. visit의captured/module입력과local값분리는복원됐지만공유효과OUTPUT이여전히빈배열이다. 남은승인1회로진단을1생성3재사용해완료했고독립검수PASS로현재원문INPUT·분기·상태효과·근거를확인했다. Python20회는소진됐다. 후보품질PASS와정상snapshot의현재4/기존stale25는구분한다.
+
+TS8개는2생성6재사용 후7PASS/1HOLD였다. 조건부표준overlap책임은복원됐지만상위OUTPUT에별도callback의내부식이재인용돼기존비중복기준HOLD다. Button은1생성 후독립PASS로imported값INPUT·필수타입·분기·후행rest제외키와남는키의조건부효과모순을해결했다. JSX전체언어/외부프로젝트의통과를추론하지않는다. SQL추가1회승인은질문중이며새SQL호출은없다.
+
+확대누적108실호출·입력619344·출력93574·추정USD0.100579925, 초기확보분포함USD0.12988596다. 초기미확보3건과Work개발사용량은제외·청구실측아니다. 남은공유효과누락과callback식중복의최소다음제안을준비했지만전체완료는아니다.

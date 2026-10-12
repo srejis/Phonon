@@ -1,7 +1,8 @@
+import {pythonModuleStateReads,pythonInputRoleHints,pythonInputRoleInstructions} from '../src/input-role-hints.mjs';
 /** H3: one-pass claim ownership ledger. No I/O or model calls. */
 export const hypothesis = Object.freeze({
   id: 'h3',
-  version: 25,
+  version: 26,
   name: 'Ownership ledger with single-pass owner checks',
   strategy: 'Separate local evidence from child-owned claims; check ownership internally in the same response; host projects the trace.'
 });
@@ -61,47 +62,6 @@ const hasJsxPropSpread = node => {
   return false;
 };
 
-const pythonModuleStateReads = node => {
-  if (node.language !== 'python') return [];
-  const localNames = new Set(list(node.bindings).filter(binding => binding.scope !== '<module>').map(binding => binding.name));
-  const candidates = list(node.scopeBindings).filter(binding => binding.kind === 'assignment' && binding.scope === '<module>' && !binding.targetId && typeof binding.name === 'string' && /^[A-Za-z_]\w*$/.test(binding.name) && !localNames.has(binding.name) && !list(node.scopeBindings).some(other => other.name === binding.name && (other.scope !== '<module>' || other.kind !== 'assignment' || other.targetId)));
-  if (!candidates.length) return [];
-  const rawLines = printable(node.source).split(/\r?\n/);
-  const lines = pythonEvidenceCode(node.source).split(/\r?\n/), found = new Map();
-  let rootSeen = false, header = false, nestedIndent = null;
-  for (const [index, content] of lines.entries()) {
-    let line = content;
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const indent = line.match(/^[ \t]*/)[0].replace(/\t/g,'        ').length;
-    if (nestedIndent !== null) {if (indent > nestedIndent) continue; nestedIndent = null;}
-    if (/^(?:async\s+)?def\s|^class\s/.test(trimmed)) {
-      if (!rootSeen && (!node.kind || node.kind === 'function_definition') && /^(?:async\s+)?def\s/.test(trimmed)) {rootSeen = true; header = !/:\s*$/.test(trimmed);}
-      else nestedIndent = indent;
-      continue;
-    }
-    if (header) {if (/:\s*$/.test(trimmed)) header = false; continue;}
-    if (/^(?:from\s|import\s|global\s|nonlocal\s|del\s)/.test(trimmed)) continue;
-    // Annotation-only names are not runtime state reads; retain a typed assignment's RHS.
-    if (/^\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*:/.test(line)) {
-      const assignment = line.match(/(?<![=!<>])=(?!=)/);
-      if (!assignment) continue;
-      line = line.slice(assignment.index + 1);
-    }
-    for (const binding of candidates) {
-      const names = new RegExp('\\b'+escapeRegex(binding.name)+'\\b','g');
-      let occurrence;
-      while ((occurrence = names.exec(line))) {
-        const before = line.slice(0,occurrence.index),after = line.slice(names.lastIndex);
-        if (/\.\s*$/.test(before) || /^\s*(?:=(?!=)|\()/.test(after)) continue;
-        if (!found.has(binding.name)) found.set(binding.name,{name:binding.name,kind:binding.kind,scope:binding.scope,readSites:[]});
-        const entry = found.get(binding.name), readLine = (node.startLine ?? 1) + index;
-        if (!entry.readSites.some(site=>site.line===readLine)) entry.readSites.push({line:readLine,text:rawLines[index].trim()});
-      }
-    }
-  }
-  return [...found.values()];
-};
 
 export function buildRequest(node, children = []) {
   if (!node || node.id == null) throw new TypeError('H3 requires node.id');
@@ -125,6 +85,7 @@ export function buildRequest(node, children = []) {
   }
 
   const moduleStateReads = pythonModuleStateReads(node);
+  const inputRoleHints = pythonInputRoleHints(node, children);
   const localLedger = {
     ownerId: nodeId,
     name: printable(node.name),
@@ -140,12 +101,14 @@ export function buildRequest(node, children = []) {
     ...(node.language==='sql'?{sqlDialect:node.sqlDialect,sqlDialectBasis:node.sqlDialectBasis}:{}),
     referenceSites: list(node.references),
     externalContracts: list(node.externalContracts),
+    ...(list(node.standardCollectionChecklist).length ? {standardCollectionChecklist:list(node.standardCollectionChecklist)} : {}),
     ...(list(node.localLiteralGuardChecklist).length ? {localLiteralGuardChecklist:node.localLiteralGuardChecklist} : {}),
     ...(list(node.jsxPropChecklist).length ? {jsxPropChecklist:node.jsxPropChecklist} : {}),
     ...(list(node.writeChecklist).length ? {writeChecklist:node.writeChecklist} : {}),
     ...(list(node.optionalAccessChecklist).length ? {optionalAccessChecklist:node.optionalAccessChecklist} : {}),
     ...(list(node.htmlDeclarationChecklist).length ? {htmlDeclarationChecklist:node.htmlDeclarationChecklist} : {}),
     ...(moduleStateReads.length ? {moduleStateReads} : {}),
+    ...inputRoleHints,
     ...(hasPythonFinally(node) ? {effectChecklist: list(node.calls).flatMap(call =>
       list(node.externalContracts).flatMap((contract, contractIndex) =>
         contract.name === call.name && list(contract.effects).length > 0
@@ -423,6 +386,12 @@ for computed exclusions. In the SAME response check final output against this br
 and exclusions, without an extra pass. For supplied parameter type declarations, preserve required
 versus optional FIELD BY FIELD: never make all fields optional because some have ? or defaults.
 Keep declared intersection operands; do not infer imported fields or runtime prop values.
+propSpreadEffects compares each earlier explicit prop with each later spread. excluded means the
+source's fresh rest excludes that key and no observed write/delete/rebind/escape defeated that proof:
+do NOT invent an 'if supplied' override for it in any section. remaining_may_override permits only a
+conditional same-key override, not actual key presence. unknown is not an exclusion guarantee.
+Apply the same table to final OUTPUT and PROCESS; never add an excluded key back merely because
+input props may vary. The table evaluates no runtime props and guarantees no successful render.
 For actual JSX attribute/class calculations, preserve evidenced imported VALUES read by the current
 source as INPUT by their local information role, not only as uncertainty. Unknown imported contents
 or runtime values remain uncertain. An imported CALLEE's implementation is not input data: describe
@@ -462,13 +431,12 @@ Use the supplied direct return_statement facts and current source to preserve ev
 return form in OUTPUT, including an early literal/empty result before a later child-derived result.
 Distinguish each boundary briefly; do not copy every already-explained branch predicate into OUTPUT,
 repeat child internals or imply the later result is the only return. No execution success is implied.` : '') + (node.language === 'sql' && list(node.facts).some(f => f.kind === 'sql_statements') ? `\n\nSQL declared-contract precision:
-Use the existing sql_statements AST/numbered source: preserve column required/optional and type,
-exact defaults, every UNIQUE/PRIMARY KEY column group, CHECK predicate/allowed literal set, and
-FOREIGN KEY local-to-reference column pairs in positional order. Declarations, IF NOT EXISTS and
-conditional inserts do not prove existing schema or successful changes. Cite declaration rows;
-do not duplicate the AST or invent nullable flags/current values. Use short per-table concrete
-constraint/column contract lists within the existing output budget, avoiding AST retelling,
-repeated evidence and generic constraints/defaults summaries. Keep every declared constraint.` : '') + '\n최종 언어 확인: 이 응답 안에서 모든 설명 필드의 문장이 한국어인지 확인한 뒤 확정하세요. 원문 코드·문자열·식별자는 그대로 유지하고, 추가 모델 호출이나 출력 후 번역 수리는 하지 마세요.',
+Use the existing sql_statements AST/numbered source: preserve required/optional column types and exact defaults,
+UNIQUE/PRIMARY KEY groups, full CHECK predicates/literal sets and ordered FOREIGN KEY column pairs.
+Declarations, IF NOT EXISTS and conditional inserts do not prove existing schema/success. Cite rows;
+never duplicate the AST or invent nullable flags/current values. Keep concrete per-table contract
+lists concise without dropping constraints or repeating evidence. SQL/code lists also need a meaningful Korean contract label/verb in EACH prose item; pure ASCII
+lists are not prose. Preserve raw literals/identifiers; no translation/prefix repair or extra pass.` : '') + (list(node.standardCollectionChecklist).length ? '\n\n'+"Source-proven conditional standard collections:\nstandardCollectionChecklist records an unshadowed direct Set construction, declared array receiver\nand direct some callback using that same captured Set. Assuming actual values satisfy the declared\narray contract and standard Set/Array methods/prototypes have not been replaced, explain the current\noperation as a Boolean test for at least one common value, ending at the first truthy membership\nresult; otherwise false. Preserve the actual empty-input guard. Type annotations are not runtime\nvalidation. Do not apply this rule to custom/shadowed/aliased/reassigned receivers or methods.\nKeep unsupported runtime behavior uncertain, without erasing this conditional source responsibility.\nA separate callback owns its exact formula; do not copy its internals or invent an invocation edge." : '') + (Object.keys(inputRoleHints).length ? '\n\n'+pythonInputRoleInstructions : '') + '\n최종 언어 확인: 이 응답 안에서 모든 설명 필드의 문장이 한국어인지 확인한 뒤 확정하세요. 원문 코드·문자열·식별자는 그대로 유지하고, 추가 모델 호출이나 출력 후 번역 수리는 하지 마세요.',
     input: JSON.stringify({
       strategy: hypothesis.id,
       currentNodeId: nodeId,

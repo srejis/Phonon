@@ -1,7 +1,7 @@
 /** H3: one-pass claim ownership ledger. No I/O or model calls. */
 export const hypothesis = Object.freeze({
   id: 'h3',
-  version: 24,
+  version: 25,
   name: 'Ownership ledger with single-pass owner checks',
   strategy: 'Separate local evidence from child-owned claims; check ownership internally in the same response; host projects the trace.'
 });
@@ -422,7 +422,11 @@ spread, including in OUTPUT; only source-supported remaining keys may do so. Do 
 for computed exclusions. In the SAME response check final output against this branch's exact order
 and exclusions, without an extra pass. For supplied parameter type declarations, preserve required
 versus optional FIELD BY FIELD: never make all fields optional because some have ? or defaults.
-Keep declared intersection operands; do not infer imported fields or runtime prop values.` : '') + (list(node.writeChecklist).length || list(node.optionalAccessChecklist).length ? `\n\nJavaScript source write and optional-access completion:
+Keep declared intersection operands; do not infer imported fields or runtime prop values.
+For actual JSX attribute/class calculations, preserve evidenced imported VALUES read by the current
+source as INPUT by their local information role, not only as uncertainty. Unknown imported contents
+or runtime values remain uncertain. An imported CALLEE's implementation is not input data: describe
+its evidenced call boundary/use without inventing its internals, exports or runtime success.` : '') + (list(node.writeChecklist).length || list(node.optionalAccessChecklist).length ? `\n\nJavaScript source write and optional-access completion:
 writeChecklist preserves actual owned writes and confirmed lexical module scope where known.
 Represent module-state writes AND boundary-observable property mutation requests in OUTPUT; locally
 constructed, unexposed intermediate mutations remain PROCESS. Do not invent external state merely

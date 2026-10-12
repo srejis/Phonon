@@ -1,4 +1,4 @@
-import {MIN_INPUT_TOKENS,MAX_INPUT_TOKENS,DEFAULT_INPUT_TOKENS} from './analysis-budget.mjs';
+import {MIN_INPUT_TOKENS,MAX_INPUT_TOKENS,DEFAULT_INPUT_TOKENS,MIN_OUTPUT_TOKENS,MAX_OUTPUT_TOKENS,DEFAULT_OUTPUT_TOKENS} from './analysis-budget.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -76,8 +76,8 @@ export function getNode(id,nodeId){
 export function requestAnalysis(id,options={}){
  assertRuntimeConditions();
  state.getProject(id);
- const maxCalls=options.maxCalls??0,maxInputTokens=options.maxInputTokens??DEFAULT_INPUT_TOKENS,maxOutputTokens=options.maxOutputTokens??1000;
- if(!Number.isInteger(maxCalls)||maxCalls<0||maxCalls>24||!Number.isInteger(maxInputTokens)||maxInputTokens<MIN_INPUT_TOKENS||maxInputTokens>MAX_INPUT_TOKENS||!Number.isInteger(maxOutputTokens)||maxOutputTokens<64||maxOutputTokens>2000)throw new Error('Analysis budget outside permitted range');
+ const maxCalls=options.maxCalls??0,maxInputTokens=options.maxInputTokens??DEFAULT_INPUT_TOKENS,maxOutputTokens=options.maxOutputTokens??DEFAULT_OUTPUT_TOKENS;
+ if(!Number.isInteger(maxCalls)||maxCalls<0||maxCalls>24||!Number.isInteger(maxInputTokens)||maxInputTokens<MIN_INPUT_TOKENS||maxInputTokens>MAX_INPUT_TOKENS||!Number.isInteger(maxOutputTokens)||maxOutputTokens<MIN_OUTPUT_TOKENS||maxOutputTokens>MAX_OUTPUT_TOKENS)throw new Error('Analysis budget outside permitted range');
  if(options.nodeIds!==undefined&&(!Array.isArray(options.nodeIds)||options.nodeIds.some(id=>typeof id!=='string'||!id.trim())))throw new Error('nodeIds must be an array of nonempty node identifiers');
  const existing=state.readJob(id);
  if(existing?.status==='queued'||existing?.status==='running')return existing;

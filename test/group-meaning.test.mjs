@@ -90,3 +90,9 @@ test('confirmed state reference requires a child use and preserves kind/field/ev
  const internal={id:'reference-cycle',members:[{...refGroup.members[0],references:[{...reference,targetId:'reader'}]}]};
  assert.deepEqual(decodeGroupRequestData(JSON.parse(buildGroupRequest(internal,[]).input)).memberLedgers[0].internalReferences,[{...reference,targetId:'reader'}]);
 });
+
+test('self-call group outputs one requested member while completed external child stays a contract only',()=>{
+ const self={id:'one-member',members:[{id:'visit',language:'python',startLine:1,endLine:3,source:'def visit(n):\n if n: return visit(n-1)\n return leaf(n)',facts:[],calls:[{targetId:'visit',line:2},{targetId:'leaf',line:3}]}]},request=buildGroupRequest(self,children),data=decodeGroupRequestData(JSON.parse(request.input));
+ assert.deepEqual(data.outputMemberIds,['visit']);assert.equal(data.outputMemberCount,1);assert.deepEqual(data.externalOwnershipLedger.map(c=>c.id),['leaf']);assert.deepEqual(data.memberLedgers[0].requiredChildIds,['leaf','visit']);assert.match(request.instructions,/NEVER requested output members/);assert.match(request.instructions,/Self calls still generate just the requested member/);
+ const member={id:'visit',input:['재귀 조건에 쓰는 값'],process:['현재 조건 검사'],output:['현재 호출 또는 하위 결과 반환'],childUses:[{childId:'visit',description:'자기 호출 결과 사용'},{childId:'leaf',description:'하위 결과 사용'}],uncertainty:[],evidence:[]};assert.equal(validateGroupMeaning({id:self.id,members:[member]},self,children).length,1);assert.throws(()=>validateGroupMeaning({id:self.id,members:[member,{...member,id:'leaf'}]},self,children),/member count mismatch/);
+});

@@ -1,4 +1,4 @@
-import {MIN_INPUT_TOKENS,MAX_INPUT_TOKENS,DEFAULT_INPUT_TOKENS} from './analysis-budget.mjs';
+import {MIN_INPUT_TOKENS,MAX_INPUT_TOKENS,DEFAULT_INPUT_TOKENS,MIN_OUTPUT_TOKENS,MAX_OUTPUT_TOKENS,DEFAULT_OUTPUT_TOKENS} from './analysis-budget.mjs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -43,7 +43,7 @@ export function createPhononServer(engine = defaultEngine) {
       nodeIds: z.array(identifier()).optional(),
       maxCalls: z.number().int().min(0).max(24).default(0),
       maxInputTokens: z.number().int().min(MIN_INPUT_TOKENS).max(MAX_INPUT_TOKENS).optional(),
-      maxOutputTokens: z.number().int().min(64).max(2000).optional()
+      maxOutputTokens: z.number().int().min(MIN_OUTPUT_TOKENS).max(MAX_OUTPUT_TOKENS).optional()
     }
   }, safe(({projectId, files, nodeIds, maxCalls = 0, maxInputTokens, maxOutputTokens}) =>
     engine.requestAnalysis(projectId, {

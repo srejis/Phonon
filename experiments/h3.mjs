@@ -1,7 +1,7 @@
 /** H3: one-pass claim ownership ledger. No I/O or model calls. */
 export const hypothesis = Object.freeze({
   id: 'h3',
-  version: 16,
+  version: 20,
   name: 'Ownership ledger with single-pass owner checks',
   strategy: 'Separate local evidence from child-owned claims; check ownership internally in the same response; host projects the trace.'
 });
@@ -9,6 +9,32 @@ export const hypothesis = Object.freeze({
 const escapeRegex = value => Array.from(String(value)).map(ch => '.+*?^$()[]{}|'.includes(ch) || ch.charCodeAt(0) === 92 ? String.fromCharCode(92) + ch : ch).join('');
 const list = value => Array.isArray(value) ? value : [];
 const printable = value => value == null ? '' : String(value);
+
+
+// Source-only detection: ignore string/comment data before checking Python guard predicates.
+const hasNegatedPythonGuard = node => {
+  if (node.language !== 'python') return false;
+  const code = printable(node.source).replace(/"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|#[^\r\n]*/g, token => token.replace(/[^\r\n]/g, ' '));
+  return /(?:^|\n)\s*(?:if|elif|while)\s+[^:]*\bnot\b[^:]*:/m.test(code);
+};
+
+
+const pythonEvidenceCode = source => printable(source).replace(/"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|#[^\r\n]*/g, token => token.replace(/[^\r\n]/g, ' '));
+const hasPythonFinally = node => {
+  if (node.language !== 'python') return false;
+  const code = pythonEvidenceCode(node.source);
+  const tries = [...code.matchAll(/^([ \t]*)try\s*:/gm)].map(match => match[1]);
+  return [...code.matchAll(/^([ \t]*)finally\s*:/gm)].some(match => tries.includes(match[1]));
+};
+const hasPythonDefaultOrFinally = node => {
+  if (node.language !== 'python') return false;
+  const code = pythonEvidenceCode(node.source);
+  const parameterCode = pythonEvidenceCode(node.parameters || code.slice(0, code.indexOf('\n')));
+  const identifierDefault = [...parameterCode.matchAll(/=\s*([A-Za-z_]\w*)/g)].some(match => !['None','True','False'].includes(match[1]));
+  const tries = [...code.matchAll(/^([ \t]*)try\s*:/gm)].map(match => match[1]);
+  const actualFinally = [...code.matchAll(/^([ \t]*)finally\s*:/gm)].some(match => tries.includes(match[1]));
+  return identifierDefault || actualFinally;
+};
 
 export function buildRequest(node, children = []) {
   if (!node || node.id == null) throw new TypeError('H3 requires node.id');
@@ -46,6 +72,12 @@ export function buildRequest(node, children = []) {
     ...(node.language==='sql'?{sqlDialect:node.sqlDialect,sqlDialectBasis:node.sqlDialectBasis}:{}),
     referenceSites: list(node.references),
     externalContracts: list(node.externalContracts),
+    ...(hasPythonFinally(node) ? {effectChecklist: list(node.calls).flatMap(call =>
+      list(node.externalContracts).flatMap((contract, contractIndex) =>
+        contract.name === call.name && list(contract.effects).length > 0
+          ? [{line: call.line ?? null, name: printable(call.name), contractIndex, effects: [...contract.effects]}]
+          : [])
+    )} : {}),
     unresolvedCalls: list(node.calls).filter(call =>
       call.targetId == null && !list(node.externalContracts).some(contract => contract.name === call.name)
     ).map(call => ({name: printable(call.name), line: call.line ?? null})),
@@ -73,6 +105,11 @@ The schema is:
  "childUses":[{"childId":string,"description":string}],"uncertainty":string[],
  "evidence":[{"line":number,"claim":string}]}
 Set id to the current node id. Write all explanations in Korean, preserving code identifiers.
+응답 언어 계약: input/process/output의 각 설명, childUses.description, uncertainty,
+evidence.claim의 설명 문장은 모두 한국어로 작성하세요. 영어·러시아어 등 다른 언어로
+설명하지 마세요. id, 파일 경로, 코드 식별자, 원문 문자열 리터럴, 정규식과 코드 인용은
+번역하거나 바꾸지 말고 정확히 보존하세요. 원문의 언어는 설명 문장의 언어를 결정하지
+않습니다. 외국어 설명에 한국어 낱말만 붙여 검사를 우회하지 말고 설명 자체를 한국어로 쓰세요.
 
 Ownership rules:
 1. Explain inputs by the information they provide to the current operations, fields, or
@@ -208,7 +245,44 @@ call appears in uncertainty, every claim has been internally checked for ownersh
 local sections. This is the only model response and no later verification response is available.`;
 
   return {
-    instructions,
+    instructions: instructions + (hasNegatedPythonGuard(node) ? `\n\nPython negated-guard precision (source contains an actual not predicate):
+For every direct return guard, preserve the complete source predicate, including each not,
+and/or operator and grouping, in process and its supporting evidence. Never reduce negated
+operands to a positive call list. Keep the predicate verbatim when paraphrasing could reverse
+its polarity; internally compare the explained return path with the full numbered source
+predicate in this SAME response, without another model pass.
+Distinguish a predicate returning False from an exception during its evaluation. False is not
+a generic lookup failure. Apply an exception-to-None/return outcome only to operations actually
+inside the matching try and the exact caught classes; never apply it to earlier/later calls
+outside that try. Preserve the supplied child's information contract: a parsed metadata marker
+is not filesystem existence, and must not be renamed as file-existence information.` : '') + (hasPythonDefaultOrFinally(node) ? `\n\nPython default/state and finally boundary precision:
+Inspect the signature/default expressions and existing scopeBindings together. Preserve defaults
+that reference an identifier as part of the parameter contract, including omitted-argument use
+and keyword-only placement. A global default expression is evaluated at function definition
+according to the source contract; do not guarantee its actual runtime value or treat it as a
+literal introduced by the body. Distinguish parameter defaults, owned literals/intermediates,
+and pre-existing module/class state actually read. A global name read to form only part of a
+path or fallback address still supplies external INPUT state, separately from local path assembly.
+Do not classify every scopeBindings record as input: only evidenced defaults and actual reads.
+OUTPUT must account for every actual return form/boundary, including an early None before later
+search/work and a None after that work. Conditions already explicit in process need not be copied
+in full into every output sentence; clearly distinguish the separate return boundaries instead.
+A finally belongs to the entire matching try BODY, including its FIRST operation: normal exit,
+return and exceptions from any operation inside that body reach the finally under Python semantics.
+Do not narrow its scope to just later validation/replacement, and do not extend it to cleanup
+or other statements before the try. Describe requested cleanup, not guaranteed successful cleanup.` : '') + (hasPythonFinally(node) ? `\n\nPython finally effect coverage:
+localLedger.effectChecklist repeats only existing verified externalContracts.effects at matching
+source call sites in their supplied order. contractIndex points to the unchanged external contract,
+including its provenance and conditional assumptions. These are SOURCE REQUESTS under that formal
+contract, never evidence of executed success or actual state. Reads, queries and resource acquisition
+are not automatically external writes; distinguish them from confirmed mutation/emission effects.
+Before finalizing OUTPUT, account for every evidenced mutation/emission in this checklist, including
+pre-try preparation effects and the separate initial versus finally cleanup requests. Use numbered
+source rows to identify their distinct roles and actual reachability; never imply all effects run
+on every path. Retain arguments/formulas and detailed sequencing in PROCESS rather than duplicating
+them in OUTPUT. Do not omit a verified creation/copy/replacement/cleanup effect merely because the
+callee return is ignored; do not expose its unused return as caller output. This checklist is an
+attention aid, not a new contract, execution result, extra model pass or quality guarantee.` : '') + '\n최종 언어 확인: 이 응답 안에서 모든 설명 필드의 문장이 한국어인지 확인한 뒤 확정하세요. 원문 코드·문자열·식별자는 그대로 유지하고, 추가 모델 호출이나 출력 후 번역 수리는 하지 마세요.',
     input: JSON.stringify({
       strategy: hypothesis.id,
       currentNodeId: nodeId,

@@ -31,7 +31,7 @@ export function createPhononServer(engine = defaultEngine) {
     inputSchema: {name: z.string().min(1).max(200), path: identifier()}
   }, safe(({name, path}) => engine.registerProject(name, path)));
   server.registerTool('analysis_status', {
-    description: 'Read a project analysis status and progress.',
+    description: 'Read shared cross-process analysis status and progress. queued/running requires matching lock token and verified owner process start identity; unknown/interrupted never authorizes automatic restart. coverage and unexplainedNodeIds distinguish not-generated nodes from stale existing explanations; coverage.scopeKind and complete distinguish partial from whole coverage.',
     inputSchema: {projectId: identifier()},
     annotations: {readOnlyHint: true}
   }, safe(({projectId}) => engine.getStatus(projectId)));

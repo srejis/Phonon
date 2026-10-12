@@ -28,7 +28,7 @@ test('AST resultUse separates ignored call, local use, direct return and raised 
  const find=name=>node.calls.find(c=>c.name===name);assert.equal(find('shutil.copy2').resultUse,'ignored');assert.equal(find('str').resultUse,'local_use');assert.equal(find('ValueError').resultUse,'raised');assert.equal(find('dst.with_suffix').resultUse,'direct_return');
  const copy=node.externalContracts.find(c=>c.name==='shutil.copy2');assert.ok(copy.returns.some(v=>v.includes('경로')));assert.ok(copy.effects.some(v=>v.includes('복사')));
  const ledger=JSON.parse(buildRequest(requestNode(node),[]).input).localLedger;assert.equal(ledger.callSites.find(c=>c.name==='shutil.copy2').resultUse,'ignored');
- assert.match(buildRequest(requestNode(node),[]).instructions,/must\n   NOT become this node's output/);assert.equal(hypothesis.version,16);
+ assert.match(buildRequest(requestNode(node),[]).instructions,/must\n   NOT become this node's output/);assert.equal(hypothesis.version,20);
 });
 test('unknown stat and constructor/deep chains are not promoted by method spelling alone',async()=>{
  const node=await parse('unsupported','from pathlib import Path\ndef manage(dst: Path):\n    dst.stat()\n    other.unlink()\n    Path("x").mkdir()\n');assert.deepEqual(pathContracts(node),[]);

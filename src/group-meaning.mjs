@@ -1,3 +1,4 @@
+import {encodeGroupRequestData, groupEncodingInstructions} from './group-request-encoding.mjs';
 /** One response for a confirmed dependency SCC; no I/O or model calls. */
 const sections = ['input', 'process', 'output', 'childUses'];
 const fail = message => {throw new TypeError(`Invalid group meaning: ${message}`);};
@@ -113,7 +114,7 @@ caller argument from childUses; retain only a minimal responsibility label and c
 Remove every code summary or known-condition/return restatement from uncertainty; keep only
 unknown constraints. These restrictions apply equally to internal SCC members and external children.
 Do not accept ownerChecks as a correctness guarantee. All explanation text in input/process/output/childUses/uncertainty/evidence.claim MUST be Korean, preserving code identifiers. English-only prose is rejected. Each evidence claim describes only the fact supported by that exact cited row; split facts on different rows into separate entries. No additional tools or model passes are available.`;
-  return {instructions, input: JSON.stringify({
+  return {instructions: instructions + groupEncodingInstructions, input: JSON.stringify(encodeGroupRequestData(JSON.parse(JSON.stringify({
     groupId: group.id,
     internalMeaningStatus: 'not_precomputed; infer_jointly_from_member_sources',
     memberLedgers: [...members.values()].map(member => ({...member,
@@ -121,7 +122,7 @@ Do not accept ownerChecks as a correctness guarantee. All explanation text in in
       internalCalls: (member.calls ?? []).filter(call => members.has(call?.targetId)),
       internalReferences: (member.references ?? []).filter(reference => members.has(reference?.targetId))})),
     externalOwnershipLedger: [...children.values()].filter(child => externalIds.has(child.id))
-  })};
+  }))))};
 }
 
 export function validateGroupMeaning(payload, group, externalChildren = []) {

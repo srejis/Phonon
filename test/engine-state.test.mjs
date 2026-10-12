@@ -54,11 +54,12 @@ test('same-file mixed current/old nodeSettings marks exactly the old-condition n
  assert.equal(getNode(f.project.id,f.nodes[1].id).stale,true);
 });
 
-test('missing node meaning stays stale despite matching per-node conditions',()=>{
+test('missing node meaning is incomplete coverage, while getNode retains not-generated behavior',()=>{
  const f=fixture('missing');delete f.snapshot.meanings[f.nodes[0].id];seed(f);
  const status=getStatus(f.project.id);
- assert.equal(status.stale,true);assert.deepEqual(status.staleNodeIds,[f.nodes[0].id]);
- const result=getNode(f.project.id,f.nodes[0].id);assert.equal(result.meaning,null);assert.equal(result.stale,true);
+ assert.equal(status.stale,false);assert.deepEqual(status.staleNodeIds,[]);
+ assert.deepEqual(status.unexplainedNodeIds,[f.nodes[0].id]);assert.equal(status.coverage.complete,false);assert.equal(status.coverage.unexplainedNodes,1);assert.equal(status.coverage.staleExplainedNodes,0);
+ const result=getNode(f.project.id,f.nodes[0].id);assert.equal(result.meaning,null);assert.equal(result.stale,true);assert.equal(result.explanationStatus,'not_generated');
 });
 
 test('deleted previously normal source is detected without altering old successful metadata',()=>{
@@ -87,4 +88,37 @@ test('legacy snapshots fall back to global conditions and changed same-file sour
  f.snapshot.settingsHash=f.current;seed(f);fs.appendFileSync(f.file,'\n# owned fixture changed\n');
  const status=getStatus(f.project.id);
  assert.deepEqual(status.changedFiles,[f.file]);assert.deepEqual(status.staleNodeIds,f.nodes.map(n=>n.id));
+});
+
+test('partial coverage retains current explanations without labeling unexplained siblings stale',()=>{
+ const f=fixture('partial-coverage');delete f.snapshot.meanings[f.nodes[1].id];f.snapshot.scope='partial_with_forward_dependencies_and_reverse_impact';seed(f);
+ const status=getStatus(f.project.id);
+ assert.equal(status.stale,false);assert.deepEqual(status.staleNodeIds,[]);
+ assert.deepEqual(status.unexplainedNodeIds,[f.nodes[1].id]);
+ assert.equal(status.coverage.explainedNodes,1);assert.equal(status.coverage.currentExplainedNodes,1);
+ assert.equal(status.coverage.scopeKind,'partial');assert.equal(status.coverage.complete,false);
+ assert.equal(getNode(f.project.id,f.nodes[0].id).explanationStatus,'current');
+});
+test('an unexplained dependency invalidates only existing upstream explanations',()=>{
+ const f=fixture('missing-dependency');delete f.snapshot.meanings[f.nodes[0].id];
+ f.snapshot.graph.nodes[1].calls=[{targetId:f.nodes[0].id}];seed(f);
+ const status=getStatus(f.project.id);
+ assert.deepEqual(status.unexplainedNodeIds,[f.nodes[0].id]);
+ assert.deepEqual(status.staleNodeIds,[f.nodes[1].id]);
+ assert.equal(status.coverage.staleExplainedNodes,1);
+});
+test('changes propagate through unexplained intermediate nodes to an existing parent',()=>{
+ const f=fixture('intermediate');const leaf={id:'intermediate:leaf',file:f.file,name:'leaf',calls:[],lineMap:[1]};
+ f.snapshot.graph.nodes.push(leaf);delete f.snapshot.meanings[f.nodes[0].id];
+ f.snapshot.graph.nodes[0].calls=[{targetId:leaf.id}];f.snapshot.graph.nodes[1].calls=[{targetId:f.nodes[0].id}];
+ f.snapshot.nodeSettings[leaf.id]='old-condition';seed(f);
+ const status=getStatus(f.project.id);
+ assert.deepEqual(status.staleNodeIds,[f.nodes[1].id]);
+ assert.deepEqual(status.unexplainedNodeIds,[f.nodes[0].id,leaf.id]);
+});
+test('whole coverage complete requires every current node and no source or structure failure',()=>{
+ const f=fixture('whole-coverage');f.snapshot.scope='whole_within_current_limits';f.snapshot.structureComplete=true;seed(f);
+ assert.equal(getStatus(f.project.id).coverage.scopeKind,'whole');
+ assert.equal(getStatus(f.project.id).coverage.complete,true);
+ f.snapshot.structureComplete=false;seed(f);assert.equal(getStatus(f.project.id).coverage.complete,false);
 });

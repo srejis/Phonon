@@ -65,7 +65,7 @@ node cli.mjs resume-api --confirmed-by-user
 node src/mcp.mjs
 ```
 
-stdio의 `list_projects`, `register_project`, `analysis_status`, `request_analysis`, `get_node`를 제공합니다. 요청은 `running`과 작업 ID를 즉시 반환하고 상태 도구로 완료/실패를 조회합니다. 예산 생략은 호출 0입니다. 실제 SDK Client↔stdio 서버↔공유 엔진으로 5개 도구·근거·하위 버전·profile·캐시 재사용을 검증했습니다.
+stdio의 `list_projects`, `register_project`, `analysis_status`, `request_analysis`, `get_node`를 제공합니다. 요청은 `queued`/`running`과 작업 ID를 즉시 반환하고 상태 도구로 완료/실패를 조회합니다. 예산 생략은 호출 0입니다. 실제 SDK Client↔stdio 서버↔공유 엔진으로 5개 도구·근거·하위 버전·profile·캐시 재사용을 검증했습니다.
 
 ## 실험 기록·재현
 
@@ -78,3 +78,6 @@ node test/engine-extended.mjs "D:\project\검토한-작은-프로젝트" "검토
 유료 검사는 실제 모델 호출 권한과 검토된 작은 원본이 필요합니다. 실행 계획/실제 결과/원본 대비 판정/사용량/실패 기록은 `.local`에 보존합니다. 형식 검사 성공과 설명 품질 검수는 구분합니다.
 
 공개 저장소에는 구현·프롬프트·자체 작성 회귀 사례·실행 문서·빈 설정 예시만 포함합니다. `.env`, 다른 프로젝트 원본/생성 설명, 캐시·사용량·응답 로그는 제외합니다.
+## 진행 중인 실제 프로젝트 확대
+
+사용자 확정에 따라 기초 가설은 3개, 서브에이전트는 메인 외 3명입니다. 실제 Python 캐시 탐색 7노드는 독립 원본 대조를 통과했습니다. 실제 파일 간 30노드·28그룹 및 다른 언어의 확대 검증은 진행 중이며, 초기 소형 결과를 전체 완료로 판단한 결론은 철회했습니다. 현행 실패·보완·회차별 비용은 [실험 이력](docs/experiment-notes.md)을 따릅니다. 미생성 설명과 기존 설명의 오래됨은 별도로 표시하며, CLI·UI·MCP의 작업 진행·완료 상태는 같은 작업 기록을 읽습니다.

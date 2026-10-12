@@ -11,7 +11,6 @@ import {buildGroupRequest,validateGroupMeaning} from './group-meaning.mjs';
 import {validateMeaningLanguage} from './meaning-language.mjs';
 import {captureRuntimeConditions,loadedRuntimeConditions,checkRuntimeConditions,assertRuntimeConditions} from './runtime-conditions.mjs';
 export const registerProject=state.registerProject,listProjects=state.listProjects;
-const jobs=new Map();
 const allowed=new Set(['.py','.ts','.tsx','.js','.jsx','.html','.css','.sql']);
 const ignored=new Set(['node_modules','.git','.venv','venv','.local','.npm-cache','dist','build','TheCodecache']);
 const ENGINE_VERSION='engine-2';
@@ -37,41 +36,61 @@ function settings(){
 export function currentAnalysisConditions(){return settings();}
 function readOptional(file){try{return JSON.parse(fs.readFileSync(file,'utf8'));}catch(error){if(error.code==='ENOENT')return null;throw error;}}
 export function getStatus(id){
- const project=state.getProject(id),latest=state.readLatest(id),dir=state.projectDir(id);
- const runtime=checkRuntimeConditions(),currentSettings=settings();let stale=!latest,changedFiles=[],staleNodeIds=[],inventoryError=null;
+ const project=state.getProject(id),dir=state.projectDir(id);
+ let latest=null,snapshotError=null;try{latest=state.readLatest(id);}catch{snapshotError={code:'SNAPSHOT_UNREADABLE'};}
+ const structure=readOptional(path.join(dir,'structure.json')),snapshot=latest??structure;
+ const nodes=snapshot?.graph?.nodes??[],meanings=latest?.meanings??{};
+ const runtime=checkRuntimeConditions(),currentSettings=settings();
+ let stale=!!snapshotError,changedFiles=[],staleNodeIds=[],inventoryError=null;
+ const unexplainedNodeIds=nodes.filter(node=>!meanings[node.id]).map(node=>node.id);
  if(latest){
   for(const f of (latest.graph?.files??[])){try{if(hash(fs.readFileSync(f.file,'utf8'))!==f.hash)changedFiles.push(f.file);}catch{changedFiles.push(f.file);}}
   try{const current=selectedFiles(project),old=new Set((latest.graph?.files??[]).map(f=>f.file));for(const f of current)if(!old.has(f))changedFiles.push(f);}catch(error){inventoryError=error.message;}
   const changed=new Set(changedFiles);
-  staleNodeIds=(latest.graph?.nodes??[]).filter(n=>changed.has(n.file)||(latest.nodeSettings?.[n.id]??latest.settingsHash)!==currentSettings||!latest.meanings?.[n.id]||(latest.staleRetainedNodeIds??[]).includes(n.id)||(latest.nodeSourceHashes?.[n.id]!==undefined&&latest.nodeSourceHashes[n.id]!==hash(n.source??''))).map(n=>n.id);
-  const staleSet=new Set(staleNodeIds),reverse=new Map();
-  for(const node of latest.graph?.nodes??[])for(const target of dependencyIds(node)){
+  // Missing explanations are incomplete coverage, not old explanations.
+  // They still invalidate an existing caller that depends on that missing meaning.
+  const affected=new Set([...unexplainedNodeIds,...nodes.filter(n=>changed.has(n.file)||(latest.nodeSettings?.[n.id]??latest.settingsHash)!==currentSettings||(latest.staleRetainedNodeIds??[]).includes(n.id)||(latest.nodeSourceHashes?.[n.id]!==undefined&&latest.nodeSourceHashes[n.id]!==hash(n.source??''))).map(n=>n.id)]);
+  const reverse=new Map();
+  for(const node of nodes)for(const target of dependencyIds(node)){
    if(!reverse.has(target))reverse.set(target,new Set());reverse.get(target).add(node.id);
   }
-  const queue=[...staleSet];for(let i=0;i<queue.length;i++)for(const caller of reverse.get(queue[i])??[]){if(!staleSet.has(caller)){staleSet.add(caller);queue.push(caller);}}
-  staleNodeIds=(latest.graph?.nodes??[]).filter(node=>staleSet.has(node.id)).map(node=>node.id);
+  const queue=[...affected];for(let i=0;i<queue.length;i++)for(const caller of reverse.get(queue[i])??[]){if(!affected.has(caller)){affected.add(caller);queue.push(caller);}}
+  staleNodeIds=nodes.filter(node=>meanings[node.id]&&affected.has(node.id)).map(node=>node.id);
   stale=changedFiles.length>0||staleNodeIds.length>0||!!inventoryError;
  }
+ const explainedNodes=nodes.length-unexplainedNodeIds.length;
+ const scope=latest?.scope??'not_generated';
+ const coverage={totalNodes:nodes.length,explainedNodes,currentExplainedNodes:explainedNodes-staleNodeIds.length,staleExplainedNodes:staleNodeIds.length,unexplainedNodes:unexplainedNodeIds.length,
+  scope,scopeKind:scope.startsWith('partial')?'partial':scope.startsWith('whole')?'whole':'unknown',
+  structureComplete:snapshot?.structureComplete??(snapshot?.graph?!(snapshot.graph.diagnostics??[]).length:false),
+  complete:!!latest&&nodes.length>0&&unexplainedNodeIds.length===0&&staleNodeIds.length===0&&changedFiles.length===0&&!inventoryError&&latest.structureComplete!==false&&!(latest.graph?.diagnostics??[]).length};
  const failureFiles=fs.existsSync(path.join(dir,'failures'))?fs.readdirSync(path.join(dir,'failures')).sort():[];
- return {project,stale,changedFiles,staleNodeIds,inventoryError,restartRequired:runtime.restartRequired,runtime,desiredConditions:currentSettings,latest,structure:readOptional(path.join(dir,'structure.json')),recentFailure:failureFiles.length?readOptional(path.join(dir,'failures',failureFiles.at(-1))):null,job:jobs.get(id)??null,limits:{context:'registered_project_static_structure',meaningBudget:'request_call_and_token_limits',crossFile:'explicit_static_imports_within_analyzed_scope',cycles:'confirmed_SCC_joint_meaning',quality:'generated descriptions require review'}};
+ return {project,stale,snapshotError,changedFiles,staleNodeIds,unexplainedNodeIds,coverage,inventoryError,restartRequired:runtime.restartRequired,runtime,desiredConditions:currentSettings,latest,structure,recentFailure:failureFiles.length?readOptional(path.join(dir,'failures',failureFiles.at(-1))):null,job:state.readJob(id),limits:{context:'registered_project_static_structure',meaningBudget:'request_call_and_token_limits',crossFile:'explicit_static_imports_within_analyzed_scope',cycles:'confirmed_SCC_joint_meaning',quality:'generated descriptions require review'}};
 }
 export function getNode(id,nodeId){
  const status=getStatus(id),snapshot=status.latest??status.structure;
  const node=snapshot?.graph.nodes.find(n=>n.id===nodeId);if(!node)throw new Error('Node not present in available analysis');
  const meaning=snapshot.meanings?.[nodeId],meaningSource=meaning?(snapshot.meaningSources?.[nodeId]??{file:node.file,source:node.source,lineMap:node.lineMap}):null;
- return {node,meaning:meaning?{...meaning,evidence:meaning.evidence.map(e=>({...e,line:meaningSource.lineMap?.[e.line-1]??e.line}))}:null,meaningSource,stale:status.staleNodeIds.includes(nodeId)||!meaning,projectStale:status.stale,childVersions:snapshot.childVersions?.[nodeId]??[]};
+ return {node,meaning:meaning?{...meaning,evidence:meaning.evidence.map(e=>({...e,line:meaningSource.lineMap?.[e.line-1]??e.line}))}:null,meaningSource,explanationStatus:!meaning?'not_generated':status.staleNodeIds.includes(nodeId)?'stale':'current',stale:status.staleNodeIds.includes(nodeId)||!meaning,projectStale:status.stale,job:status.job,childVersions:snapshot.childVersions?.[nodeId]??[]};
 }
 export function requestAnalysis(id,options={}){
  assertRuntimeConditions();
  state.getProject(id);
- if(jobs.get(id)?.status==='running')return jobs.get(id);
  const maxCalls=options.maxCalls??0,maxInputTokens=options.maxInputTokens??DEFAULT_INPUT_TOKENS,maxOutputTokens=options.maxOutputTokens??1000;
  if(!Number.isInteger(maxCalls)||maxCalls<0||maxCalls>24||!Number.isInteger(maxInputTokens)||maxInputTokens<MIN_INPUT_TOKENS||maxInputTokens>MAX_INPUT_TOKENS||!Number.isInteger(maxOutputTokens)||maxOutputTokens<64||maxOutputTokens>2000)throw new Error('Analysis budget outside permitted range');
  if(options.nodeIds!==undefined&&(!Array.isArray(options.nodeIds)||options.nodeIds.some(id=>typeof id!=='string'||!id.trim())))throw new Error('nodeIds must be an array of nonempty node identifiers');
- const job={jobId:hash(id+Date.now()).slice(0,16),status:'running',startedAt:new Date().toISOString(),processed:0};jobs.set(id,job);
- setImmediate(()=>runAnalysis(id,{...options,maxCalls,maxInputTokens,maxOutputTokens},job));return {...job};
+ const existing=state.readJob(id);
+ if(existing?.status==='queued'||existing?.status==='running')return existing;
+ const lock=state.acquireLock(id);
+ const job={jobId:lock.token,jobToken:lock.token,ownerPID:process.pid,ownerStartId:lock.ownerStartId,status:'queued',queuedAt:new Date().toISOString(),processed:0};
+ try{state.writeJob(id,job);}catch(error){state.releaseLock(id);throw error;}
+ setImmediate(()=>runAnalysis(id,{...options,maxCalls,maxInputTokens,maxOutputTokens},job));return state.readJob(id);
 }
-export async function waitForJob(id){while(jobs.get(id)?.status==='running')await new Promise(resolve=>setTimeout(resolve,50));return jobs.get(id);}
+export async function waitForJob(id){
+ let shared=state.readJob(id);
+ while(shared?.status==='queued'||shared?.status==='running'){await new Promise(resolve=>setTimeout(resolve,50));shared=state.readJob(id);}
+ return shared;
+}
 const dependencyIds=node=>[...new Set([...(node.calls??[]),...(node.references??[])].map(edge=>edge.targetId).filter(Boolean))];
 function relationSignature(node){return hash({calls:(node.calls??[]).map(c=>({name:c.name,targetId:c.targetId,status:c.status,reason:c.relationReason})),references:(node.references??[]).map(r=>({targetId:r.targetId,kind:r.kind,field:r.field,access:r.access}))});}
 function analysisScope(graph,previous,files,partial,nodeIds=[]){
@@ -118,9 +137,11 @@ function validateCachedMeaning(raw,node,children){
  return node.kind==='dependency_group'?payload:{...payload,name:node.name};
 }
 async function runAnalysis(id,options,job){
- let locked=false;const project=state.getProject(id),previous=state.readLatest(id);
+ let locked=true,previous,setupComplete=false;
  try{
-  assertRuntimeConditions();state.acquireLock(id);locked=true;const analysisSettings=settings(),runtimeFingerprint=loadedRuntimeConditions.fingerprint;
+  state.assertLockOwner(id,job.jobToken);assertRuntimeConditions();job.status='running';job.startedAt=new Date().toISOString();state.writeJob(id,job);
+  const project=state.getProject(id);previous=state.readLatest(id);setupComplete=true;
+  const analysisSettings=settings(),runtimeFingerprint=loadedRuntimeConditions.fingerprint;
   const requestedFiles=selectedFiles(project,options.files);
   if(!requestedFiles.length)throw new Error('No supported sources in requested scope');
   // Structural context is the entire registered project; paid meaning scope remains bounded.
@@ -202,6 +223,7 @@ async function runAnalysis(id,options,job){
    if(meaning)reused.push(...memberIds);
    else{
     if(round.plan.calls>=options.maxCalls)throw new Error('Meaning generation requires additional allocated calls; old successful snapshot preserved');
+    state.assertLockOwner(id,job.jobToken);
     meaning=validateCachedMeaning(await explain(request,normalized,children,round),normalized,children);
     fs.writeFileSync(cachePath,JSON.stringify({cacheKey,requestHash,meaningProfile:profile,meaning,audit:{promptHash,parserVersion:VERSION,analysisConditions:analysisSettings,runtimeFingerprint}},null,2));generated.push(...memberIds);
    }
@@ -209,7 +231,7 @@ async function runAnalysis(id,options,job){
    else meanings[group.members[0].id]=meaning;
    for(const node of group.members){
     childVersions[node.id]=dependencyIds(node).map(childId=>({id:childId,meaningHash:hash(meanings[childId])}));
-    nodeSettings[node.id]=analysisSettings;nodeSourceHashes[node.id]=hash(node.source??'');meaningSources[node.id]={file:node.file,source:node.source,lineMap:node.lineMap};job.processed++;
+    nodeSettings[node.id]=analysisSettings;nodeSourceHashes[node.id]=hash(node.source??'');meaningSources[node.id]={file:node.file,source:node.source,lineMap:node.lineMap};job.processed++;job.reused=reused.length;job.generated=generated.length;state.writeJob(id,job);
    }
   }
   const staleRetainedNodeIds=[];
@@ -229,8 +251,14 @@ async function runAnalysis(id,options,job){
   const snapshot={graph,dependencyGroups:groupStructure,meanings,childVersions,nodeSettings,nodeSourceHashes,meaningSources,staleRetainedNodeIds,settingsHash:analysisSettings,runtimeFingerprint,completedAt:new Date().toISOString(),scope:partial?'partial_with_forward_dependencies_and_reverse_impact':'whole_within_current_limits',requestedFiles:scopeFiles,requestedNodeIds,analyzedNodeIds:[...needed],qualityStatus:'generated_review_required',structureComplete:graph.diagnostics.length===0,reused,generated,cacheMigrations,cacheRejected,roundId:job.jobId};
   assertRuntimeConditions();
   if(settings()!==analysisSettings)throw new Error('Analysis conditions changed during execution; previous successful snapshot preserved');
-  state.writeLatest(id,snapshot);job.status='completed';job.reused=reused.length;job.generated=generated.length;job.qualityStatus=snapshot.qualityStatus;job.cacheMigrations=cacheMigrations.length;job.cacheRejected=cacheRejected.length;
+  state.assertLockOwner(id,job.jobToken);state.writeLatest(id,snapshot);job.status='completed';job.reused=reused.length;job.generated=generated.length;job.qualityStatus=snapshot.qualityStatus;job.cacheMigrations=cacheMigrations.length;job.cacheRejected=cacheRejected.length;
  }catch(error){job.status=error instanceof APIFailure?'api_blocked':'failed';job.reason=(error instanceof APIFailure||error instanceof ModelOutputError)?error.record:error.message;
-  state.writeFailure(id,{jobId:job.jobId,status:job.status,reason:job.reason,at:new Date().toISOString(),previousSuccessfulSnapshotPreserved:!!previous});
- }finally{job.endedAt=new Date().toISOString();if(locked)state.releaseLock(id);}
+  job.failureCode=error instanceof APIFailure?'API_BLOCKED':error instanceof ModelOutputError?'MODEL_OUTPUT_FAILED':error.code==='RUNTIME_RESTART_REQUIRED'?'RUNTIME_RESTART_REQUIRED':!setupComplete?'STATE_READ_FAILED':'ANALYSIS_FAILED';
+  const message=error instanceof Error?error.message:'';
+  job.publicReason=message.startsWith('Meaning generation requires')?'Meaning generation requires additional allocated calls; old successful snapshot preserved':message.startsWith('Requested file source graph diagnostics')?'Requested file source graph diagnostics':message.startsWith('Source graph diagnostics')?'Source graph diagnostics':message.startsWith('Requested node ID')?'Requested node ID is not present in current project graph':error.code==='RUNTIME_RESTART_REQUIRED'?'분석 프로그램 코드가 변경되어 다시 시작이 필요합니다.':!setupComplete?'Stored analysis snapshot could not be read; damaged state preserved without repair.':'Analysis failed; check preserved failure record.';
+  try{state.assertLockOwner(id,job.jobToken);state.writeFailure(id,{jobId:job.jobId,status:job.status,reason:job.reason,at:new Date().toISOString(),previousSuccessfulSnapshotPreserved:!!previous});}catch{job.status='unknown';}
+ }finally{
+  job.endedAt=new Date().toISOString();
+  if(locked){try{state.writeJob(id,job);}catch{job.status='unknown';}try{state.releaseLock(id);}catch{}}
+ }
 }

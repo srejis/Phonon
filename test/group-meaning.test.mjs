@@ -1,3 +1,4 @@
+import {decodeGroupRequestData} from '../src/group-request-encoding.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {buildGroupRequest, validateGroupMeaning} from '../src/group-meaning.mjs';
@@ -17,14 +18,14 @@ function payload() {
 }
 
 test('request preserves all direct code and internal calls without fabricated completed internal meanings',()=>{
- const request=buildGroupRequest(group,children), data=JSON.parse(request.input);
- assert.equal(request.input,JSON.stringify(data));
+ const request=buildGroupRequest(group,children), data=decodeGroupRequestData(JSON.parse(request.input));
+ assert.equal(request.input,JSON.stringify(JSON.parse(request.input)));
  assert.equal(data.groupId,group.id);
  assert.equal(data.memberLedgers.length,2);
  assert.equal(data.memberLedgers[0].source,group.members[0].source);
  assert.deepEqual(data.memberLedgers[0].requiredChildIds,['b','leaf']);
  assert.deepEqual(data.memberLedgers[0].internalCalls,[{targetId:'b',line:3}]);
- assert.deepEqual(data.externalOwnershipLedger,children);
+ assert.deepEqual(data.externalOwnershipLedger,children.map(({id,input,process,output,uncertainty})=>({id,input,process,output,uncertainty})));
  assert.match(data.internalMeaningStatus,/not_precomputed/);
  assert.match(request.instructions,/zero-based index/);
  assert.match(request.instructions,/Never assume recursion terminates/);
@@ -70,13 +71,13 @@ test('external meanings must exist; internal meanings cannot be supplied as prec
  const self={id:'self-group',members:[{id:'self',startLine:1,endLine:2,source:'def self(n): return self(n)',calls:[{targetId:'self',line:1}]}]};
  const value={id:'self-group',members:[{id:'self',input:[],process:[],output:[],childUses:[{childId:'self',description:'자기 호출 결과 사용'}],uncertainty:['종료 여부 미확인'],evidence:[]}]};
  assert.equal(validateGroupMeaning(value,self,[]).length,1);
- assert.deepEqual(JSON.parse(buildGroupRequest(self,[]).input).memberLedgers[0].requiredChildIds,['self']);
+ assert.deepEqual(decodeGroupRequestData(JSON.parse(buildGroupRequest(self,[]).input)).memberLedgers[0].requiredChildIds,['self']);
 });
 
 test('confirmed state reference requires a child use and preserves kind/field/evidence without invocation',()=>{
  const reference={targetId:'leaf',kind:'class_state',line:2,field:'stored',object:'self',access:'read'};
  const refGroup={id:'state-group',members:[{id:'reader',startLine:1,endLine:2,source:'def reader(self): return self.stored',calls:[],references:[reference]}]};
- const request=buildGroupRequest(refGroup,children), data=JSON.parse(request.input);
+ const request=buildGroupRequest(refGroup,children), data=decodeGroupRequestData(JSON.parse(request.input));
  assert.deepEqual(data.memberLedgers[0].requiredChildIds,['leaf']);
  assert.deepEqual(data.memberLedgers[0].references,[reference]);
  assert.deepEqual(data.memberLedgers[0].internalCalls,[]);
@@ -85,7 +86,7 @@ test('confirmed state reference requires a child use and preserves kind/field/ev
  assert.equal(validateGroupMeaning({id:refGroup.id,members:[meaning]},refGroup,children).length,1);
  assert.throws(()=>validateGroupMeaning({id:refGroup.id,members:[{...meaning,childUses:[]}]},refGroup,children),/coverage/);
  const both={...refGroup,members:[{...refGroup.members[0],calls:[{targetId:'leaf',line:2}]}]};
- assert.deepEqual(JSON.parse(buildGroupRequest(both,children).input).memberLedgers[0].requiredChildIds,['leaf']);
+ assert.deepEqual(decodeGroupRequestData(JSON.parse(buildGroupRequest(both,children).input)).memberLedgers[0].requiredChildIds,['leaf']);
  const internal={id:'reference-cycle',members:[{...refGroup.members[0],references:[{...reference,targetId:'reader'}]}]};
- assert.deepEqual(JSON.parse(buildGroupRequest(internal,[]).input).memberLedgers[0].internalReferences,[{...reference,targetId:'reader'}]);
+ assert.deepEqual(decodeGroupRequestData(JSON.parse(buildGroupRequest(internal,[]).input)).memberLedgers[0].internalReferences,[{...reference,targetId:'reader'}]);
 });

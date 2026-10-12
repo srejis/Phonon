@@ -1,3 +1,5 @@
+import {getDeclaredPathContract} from './python-path-contracts.mjs';
+import {getPythonModuleContract} from './python-module-contracts.mjs';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -205,6 +207,48 @@ export async function resolveRelations(graph, {projectRoot} = {}) {
         call.relationReason=ambiguous?'ambiguous':resolved.reason;
         if(ambiguous || resolved.reason==='ambiguous')call.status='ambiguous';
       }
+    }
+  }
+  // Standard contracts require matching nearest lexical import evidence, never spelling alone.
+  for(const node of nodes){
+    if(node.language!=='python')continue;
+    const caller=(fileMap.get(key(node.file))??[])[0];if(!caller)continue;
+    for(const call of node.calls??[]){
+      const binding=call.importBinding,base=call.name?.split('.')[0];
+      const nearest=(node.scopeBindings??node.bindings??[]).find(item=>item.name===base);
+      const verified=!!binding&&nearest?.kind==='import'&&nearest.status!=='candidate'&&nearest.status!=='ambiguous'&&!nearest.reassigned&&
+        nearest.source===binding.source&&nearest.imported===binding.imported&&nearest.local===binding.local&&
+        (nearest.importKind??nearest.kind)===binding.kind&&(nearest.level??0)===(binding.level??0)&&
+        (call.bindingScope==null||nearest.scope===call.bindingScope)&&
+        (binding.line===undefined||nearest.line===binding.line);
+      if(!verified)continue;
+      const core=binding.source.split('.')[0];
+      // Explicit local-module collisions remain project references/unresolved, not stdlib contracts.
+      const localCore=[root,path.dirname(caller.file)].some(directory=>{
+        const moduleFile=path.join(directory,core+'.py'),packageDirectory=path.join(directory,core);
+        return inRoot(root,moduleFile)&&fs.existsSync(moduleFile)||inRoot(root,packageDirectory)&&fs.existsSync(packageDirectory);
+      });
+      if(localCore)continue;
+      const contract=getPythonModuleContract(call,{language:node.language,lexicalImportVerified:verified});
+      if(!contract)continue;
+      node.externalContracts??=[];
+      if(!node.externalContracts.some(item=>item.name===contract.name&&(item.canonicalName??item.name)===contract.canonicalName&&item.source===contract.source))node.externalContracts.push(contract);
+      call.contractStatus='verified_standard_library_contract';call.contractSource=contract.source;
+    }
+  }
+  for(const node of nodes){
+    if(node.language!=='python')continue;
+    const caller=(fileMap.get(key(node.file))??[])[0];if(!caller)continue;
+    const localPathlib=[root,path.dirname(caller.file)].some(directory=>fs.existsSync(path.join(directory,'pathlib.py'))||fs.existsSync(path.join(directory,'pathlib')));
+    if(localPathlib||modules(caller,'pathlib').reason!=='external_boundary')continue;
+    for(const call of node.calls??[]){
+      const proof=call.declaredPathProvenance,imported=proof?.importBinding;if(!imported)continue;
+      const nearest=(node.scopeBindings??node.bindings??[]).find(binding=>binding.name===imported.local);
+      const verified=nearest?.kind==='import'&&nearest.status!=='candidate'&&nearest.status!=='ambiguous'&&nearest.source==='pathlib'&&nearest.imported==='Path'&&nearest.local===imported.local&&nearest.importKind==='python_from'&&(nearest.level??0)===0;
+      const contract=getDeclaredPathContract(call,{stdlibImportVerified:verified});if(!contract)continue;
+      node.externalContracts??=[];
+      if(!node.externalContracts.some(item=>item.name===contract.name&&item.canonicalName===contract.canonicalName&&item.source===contract.source))node.externalContracts.push(contract);
+      call.contractStatus='conditional_declared_path_contract';call.contractSource=contract.source;
     }
   }
   graph.relationPolicy='Explicit static imports and reexports within analyzed project files only; no automatic source discovery.';

@@ -6,7 +6,7 @@
   "description": "Local evidence-backed hierarchical code explanations",
   "scripts": {
     "preflight": "node scripts/preflight.mjs",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "ui": "node src/ui.mjs",
     "mcp": "node src/mcp.mjs",
     "cli": "node cli.mjs"
@@ -17,6 +17,7 @@
     "js-tiktoken": "1.0.21",
     "node-sql-parser": "5.4.0",
     "openai": "7.32.0",
+    "postcss": "8.5.29",
     "tree-sitter-wasms": "0.1.13",
     "typescript": "7.0.2",
     "web-tree-sitter": "0.20.8",

@@ -121,3 +121,35 @@ test('class state references remain semantically stable when source moves',async
  const before=await fixture('state-move.ts',source);await fs.writeFile(before.file,'\n\n'+source);const after=await analyzeFiles([before.file]);
  for(const name of ['Counter.read','Counter.top_level'])assert.deepEqual(requestNode(node(before.graph,name)),requestNode(node(after,name)));
 });
+
+test('Python typed parameters bind variable names, not annotation identifiers',async()=>{
+ const {graph}=await fixture('typed-bindings.py','from pathlib import Path\nfrom typing import Callable\ndef validate(path: Path, root: Path, callback: Callable[[Path], str], count: int = 1):\n    return Path(str(path))\n');
+ const owner=node(graph,'validate');assert.deepEqual(owner.bindings.filter(b=>b.kind==='parameter').map(b=>b.name),['path','root','callback','count']);
+ const c=call(graph,'validate','Path');assert.equal(c.shadowed,false);assert.equal(c.status,'unresolved');assert.equal(c.importBinding.source,'pathlib');
+});
+
+test('Python constructor-assigned state has provenance in later method field references',async()=>{
+ const {graph}=await fixture('ctor-state.py','class VoteGroup:\n    __slots__ = ("s", "votes")\n    def __init__(self, s, word, weight):\n        self.s = float(s)\n        self.votes = {word: weight}\n    def add(self, s, word, weight):\n        if s < self.s:\n            self.s = s\n        self.votes[word] = self.votes.get(word, 0) + weight\n    def winner(self):\n        return max(self.votes.items())\n');
+ const ctor=node(graph,'VoteGroup.__init__');assert.deepEqual(ctor.initializedFields,['s','votes']);
+ for(const owner of ['VoteGroup.add','VoteGroup.winner'])assert.ok(node(graph,owner).references.some(ref=>ref.targetId===ctor.id&&ref.stateOrigin==='constructor_assignment'));
+ assert.deepEqual(ctor.references,[]);assert.ok(!node(graph,'VoteGroup.winner').references.some(ref=>ref.field==='__slots__'));
+});
+
+test('external module fields are state dependencies but not falsely confirmed own method calls',async()=>{
+ const {graph}=await fixture('ctor-modules.py','import torch.nn as nn\nclass TinyNet:\n    def __init__(self, width):\n        self.fc1 = nn.Linear(width, width)\n        self.act = nn.ReLU()\n        self.fc2 = nn.Linear(width, width)\n    def forward(self, x):\n        return self.fc2(self.act(self.fc1(x)))\n');
+ const ctor=node(graph,'TinyNet.__init__'),forward=node(graph,'TinyNet.forward');
+ assert.deepEqual(forward.references.map(ref=>ref.field).sort(),['act','fc1','fc2']);assert.ok(forward.references.every(ref=>ref.targetId===ctor.id));
+ assert.ok(forward.calls.every(c=>c.targetId===null&&c.status!=='confirmed_same_file'));
+ assert.ok(!ctor.references.some(ref=>ref.targetId===ctor.id));
+});
+
+test('constructor field overriding a method does not confirm the original method call',async()=>{
+ const {graph}=await fixture('ctor-override.py','class Worker:\n    def __init__(self, callback):\n        self.work = callback\n    def work(self):\n        return 1\n    def run(self):\n        return self.work()\n');
+ const c=call(graph,'Worker.run','self.work');assert.equal(c.targetId,null);assert.ok(node(graph,'Worker.run').references.some(ref=>ref.targetId===node(graph,'Worker.__init__').id));
+});
+
+test('constructor field metadata and dependencies remain stable under blank line movement',async()=>{
+ const source='class Worker:\n    def __init__(self, value: int):\n        self.value = value\n    def read(self):\n        return self.value\n';
+ const before=await fixture('ctor-move.py',source);await fs.writeFile(before.file,'\n\n'+source);const after=await analyzeFiles([before.file]);
+ for(const name of ['Worker.__init__','Worker.read'])assert.deepEqual(requestNode(node(before.graph,name)),requestNode(node(after,name)));
+});

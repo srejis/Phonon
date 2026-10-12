@@ -1,8 +1,12 @@
+import {callResultUse,declaredPathReceiverProof} from './python-path-contracts.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import Parser from 'web-tree-sitter';
-import sql from 'node-sql-parser';
+import {parseSQL} from './sql-parser.mjs';
+import {parseCSS} from './css-parser.mjs';
+import {getTypeContext,getPythonTypeContext} from './type-context.mjs';
+import {getPythonBuiltinContract} from './python-contracts.mjs';
 export const VERSION='parser-2';
 export const ROOT=path.resolve(import.meta.dirname,'..');
 export const hash=x=>crypto.createHash('sha256').update(typeof x==='string'?x:JSON.stringify(x)).digest('hex');
@@ -36,14 +40,15 @@ const identifierTypes=new Set(['identifier','shorthand_property_identifier_patte
 function patternNames(n){
  if(!n)return [];
  if(identifierTypes.has(n.type))return [n.text];
+ if(n.type==='typed_parameter')return patternNames(n.childForFieldName('name')??n.namedChildren.find(child=>child.type!=='type'));
  if(['pair_pattern','assignment_pattern','required_parameter','optional_parameter','default_parameter','typed_default_parameter'].includes(n.type))return patternNames(n.childForFieldName('value')&&n.type==='pair_pattern'?n.childForFieldName('value'):n.childForFieldName('pattern')??n.childForFieldName('left')??n.childForFieldName('name'));
- if(['type_annotation','type_identifier','predefined_type','attribute','member_expression','subscript','string','string_literal'].includes(n.type))return [];
+ if(['type','type_annotation','type_identifier','predefined_type','attribute','member_expression','subscript','string','string_literal'].includes(n.type))return [];
  return n.namedChildren.flatMap(patternNames);
 }
 function stringValue(n){return n?.type==='string'?n.namedChildren.map(c=>c.text).join(''):n?.text??'';}
 function collectBindings(root,entries,language,fileInfo){
  const moduleScope={name:'<module>',kind:'module',parent:null,bindings:new Map()};
- const scopes=[moduleScope],at=new Map(),pendingAssignments=[];
+ const scopes=[moduleScope],at=new Map(),pendingAssignments=[],assignmentSources=new WeakMap();
  const byAst=new Map(entries.map(e=>[astKey(e.ast),e]));
  function add(scope,name,kind,n,extra={}){
   if(!name)return;
@@ -113,7 +118,7 @@ function collectBindings(root,entries,language,fileInfo){
  }
  scan(root,moduleScope);
  function nearest(scope,name,skipClass=false){for(let current=scope;current;current=current.parent){if(skipClass&&current.kind==='class')continue;if(current.bindings.has(name))return {scope:current,items:current.bindings.get(name)};}return null;}
- for(const {scope,n,names,target}of pendingAssignments)for(const name of names){const existing=language==='python'?null:nearest(scope,name);add(existing?.scope??scope,name,'assignment',n,{target});}
+ for(const {scope,n,names,target}of pendingAssignments)for(const name of names){const existing=language==='python'?null:nearest(scope,name);const binding=add(existing?.scope??scope,name,'assignment',n,{target});assignmentSources.set(binding,n);}
  function resolve(scope,name,seen=new Set()){
   const found=nearest(scope,name,true);if(!found)return {targetId:null,status:'unresolved',binding:null};
   const {items}=found,first=items[0];
@@ -139,7 +144,7 @@ function collectBindings(root,entries,language,fileInfo){
  }
  if(language==='python')for(const [name,items]of moduleScope.bindings){const binding=items[0];fileInfo.exports.push({exported:name,local:name,source:binding.kind==='import'?binding.source:null,imported:binding.kind==='import'?binding.imported:name,kind:'named',line:binding.line,targetId:resolve(moduleScope,name).targetId});}
  const flatten=scope=>{const result=[];for(let current=scope;current;current=current.parent){if(current.kind==='class'&&scope.kind!=='class')continue;for(const items of current.bindings.values())result.push(...items);}return result;};
- return {at,scopes,moduleScope,resolve,flatten};
+ return {at,scopes,moduleScope,resolve,flatten,assignmentSources};
 }
 export async function analyzeFiles(files){
  const nodes=[],filesInfo=[],diagnostics=[];
@@ -147,12 +152,17 @@ export async function analyzeFiles(files){
   const {absolute,source}=safeSource(file),extension=path.extname(absolute),language=grammars[extension]??'sql';
   const sourceLines=source.split(/\r?\n/);const key=absolute.replaceAll('\\','/');
   const fileInfo={file:absolute,hash:hash(source),language,imports:[],exports:[]};filesInfo.push(fileInfo);
+  if(language==='css'){
+   try{nodes.push(...parseCSS(source,{file:absolute,key}).nodes);}
+   catch(error){diagnostics.push({file:absolute,status:'parse_failed',reason:'PostCSS rejected CSS syntax',line:error.line,column:error.column});}
+   continue;
+  }
   if(language==='sql'){
    try{
-    const ast=new sql.Parser().astify(source,{database:'Postgresql'});
+    const {ast,dialect,dialectBasis}=parseSQL(source);
     const normalized=canonical(sourceLines,1);
-    nodes.push({id:`${key}::sql`,name:path.basename(file),kind:'sql_file',language,file:absolute,startLine:1,endLine:sourceLines.length,...normalized,facts:[{line:1,kind:'sql_statements',text:JSON.stringify(ast)}],calls:[],scope:null});
-   }catch{diagnostics.push({file:absolute,status:'parse_failed',reason:'SQL Postgresql grammar rejected source'});}continue;
+    nodes.push({id:`${key}::sql`,name:path.basename(file),kind:'sql_file',language,sqlDialect:dialect,sqlDialectBasis:dialectBasis,file:absolute,startLine:1,endLine:sourceLines.length,...normalized,facts:[{line:1,kind:'sql_statements',text:JSON.stringify(ast)}],calls:[],scope:null});
+   }catch{diagnostics.push({file:absolute,status:'parse_failed',reason:'SQL grammar rejected source; PostgreSQL default or explicit SQLite foreign_keys dialect'});}continue;
   }
   const parser=await parserFor(language),tree=parser.parse(source);
   if(tree.rootNode.hasError()){diagnostics.push({file:absolute,status:'parse_failed',reason:'Tree-sitter ERROR or missing syntax'});tree.delete();parser.delete();continue;}
@@ -168,18 +178,24 @@ export async function analyzeFiles(files){
     if(!name && ast.parent?.type==='variable_declarator')name=ast.parent.childForFieldName('name')?.text;
     if(!name && language==='css')name=ast.namedChildren[0]?.text;
     if(!name && language==='html')name=ast.namedChildren[0]?.text;
-    name??=`anonymous@${ast.startPosition.row+1}`;
+    const anonymous=name==null;
+    if(anonymous){
+     const anonymousIndex=entries.filter(entry=>entry.node.anonymous&&entry.node.scope===(scope?.name??null)).length+1;
+     name=`anonymous#${anonymousIndex}`;
+    }
     let scopeName=scope?.name?`${scope.name}.`:'';
     if(language==='css'){let ancestor=ast.parent;const contexts=[];while(ancestor){if(ancestor.type==='media_statement')contexts.unshift(ancestor.namedChildren[0]?.text??'@media');ancestor=ancestor.parent;}scopeName=contexts.length?contexts.join(' / ')+' / ':'';}
-    const baseId=`${key}::${scopeName}${name}`;const occurrence=entries.filter(e=>e.node.id===baseId||e.node.id.startsWith(baseId+"#")).length;const id=(language==="css"||language==="html")&&occurrence?baseId+"#"+(occurrence+1):baseId;
+    const baseId=`${key}::${scopeName}${name}`;const occurrence=entries.filter(e=>e.node.name===scopeName+name).length;const id=occurrence?baseId+"#"+(occurrence+1):baseId;
     const lines=source.slice(ast.startIndex,ast.endIndex).split(/\r?\n/);
     const normal=canonical(lines,ast.startPosition.row+1);
-    const node={id,name:scopeName+name,kind:ast.type,language,file:absolute,startLine:ast.startPosition.row+1,endLine:ast.endPosition.row+1,...normal,calls:[],facts:[],scope:scope?.name??null,parameters:ast.childForFieldName('parameters')?.text??''};
+    const node={id,name:scopeName+name,kind:ast.type,language,file:absolute,startLine:ast.startPosition.row+1,endLine:ast.endPosition.row+1,...normal,calls:[],facts:[],scope:scope?.name??null,parameters:ast.childForFieldName('parameters')?.text??'',anonymous};
     node.lexicalScopes=[node.name];let lexical=scope;while(lexical){if(lexical.kind==='function')node.lexicalScopes.push(lexical.name);lexical=lexical.parent;}entries.push({ast,node});nodes.push(node);nextScope={name:node.name,kind:'function',parent:scope};
    }
    for(const child of ast.namedChildren)visit(child,nextScope);
   }
   visit(tree.rootNode);
+  if(language==='typescript'||language==='tsx')for(const entry of entries)entry.node.typeContext=getTypeContext(tree.rootNode,entry.ast);
+  if(language==='python')for(const entry of entries)entry.node.typeContext=getPythonTypeContext(tree.rootNode,entry.ast);
   if(['python','typescript','javascript','tsx'].includes(language)){
    const topStatements=tree.rootNode.namedChildren.filter(n=>!definitions.has(n.type)&& !['class_definition','class_declaration','decorated_definition'].includes(n.type)&&!(n.type==='export_statement'&&n.namedChildren.some(c=>definitions.has(c.type)||c.type==='class_declaration')));
    const hasExecution=topStatements.some(n=>!['import_statement','import_from_statement','comment','expression_statement'].includes(n.type) || (n.type==='expression_statement'&&!['string','string_literal'].includes(n.namedChildren[0]?.type)));
@@ -210,8 +226,117 @@ export async function analyzeFiles(files){
     e.node.classContext={name:item.name,initializationNodeId:id,fieldNames:node.classDefinition.fields,methodStatic:/^\s*static\b/.test(e.ast.text)||decorators.some(text=>/@(?:staticmethod|classmethod)\b/.test(text)),receiver:patternNames(e.ast.childForFieldName('parameters'))[0]??null};
    }
   }
+  // Constructor assignments own their field setup; consumers use state references, not calls.
+  for(const item of classes){
+   const methods=entries.filter(entry=>entry.node.scope===item.name&&!entry.classInit);
+   const classOwner=entries.find(entry=>entry.classInit&&entry.node.scope===item.name)?.node;
+   const constructor=methods.find(entry=>entry.node.name===item.name+(language==='python'?'.__init__':'.constructor'));
+   const fieldOwners=(classOwner?.classDefinition?.fieldDetails??[]).map(field=>({...field,ownerId:classOwner.id,kind:'class_declaration'}));
+   if(constructor){
+    const receiver=language==='python'?patternNames(constructor.ast.childForFieldName('parameters'))[0]:'this';
+    walk(constructor.ast,n=>{
+     if(!['assignment','assignment_expression'].includes(n.type))return;
+     const left=n.childForFieldName('left');
+     if(!['attribute','member_expression'].includes(left?.type))return;
+     const object=left.childForFieldName('object')?.text;
+     const name=left.childForFieldName('attribute')?.text??left.childForFieldName('property')?.text;
+     if(object!==receiver||!name)return;
+     if(!fieldOwners.some(field=>field.name===name&&field.ownerId===constructor.node.id))fieldOwners.push({name,static:false,ownerId:constructor.node.id,kind:'constructor_assignment'});
+    },n=>n!==constructor.ast&&(definitions.has(n.type)||isClass(n)));
+    constructor.node.initializedFields=fieldOwners.filter(field=>field.ownerId===constructor.node.id).map(field=>field.name);
+   }
+   if(!fieldOwners.length)continue;
+   for(const entry of methods){
+    const decorators=entry.ast.parent?.type==='decorated_definition'?entry.ast.parent.namedChildren.filter(n=>n.type==='decorator').map(n=>n.text):[];
+    entry.node.classContext={name:item.name,initializationNodeId:classOwner?.id??constructor?.node.id,
+     fieldNames:[...new Set(fieldOwners.map(field=>field.name))],fieldOwners,
+     methodStatic:/^\s*static\b/.test(entry.ast.text)||decorators.some(text=>/@(?:staticmethod|classmethod)\b/.test(text)),
+     receiver:language==='python'?patternNames(entry.ast.childForFieldName('parameters'))[0]??null:null};
+   }
+  }
   const bindingInfo=collectBindings(tree.rootNode,entries,language,fileInfo);
-  const callScopes=new WeakMap();
+  const methodInfo=new Map();
+  for(const item of classes){
+   const body=item.ast.childForFieldName('body');
+   const methods=entries.filter(e=>!e.classInit&&definitions.has(e.ast.type)&&body&&(e.ast.parent&&astKey(e.ast.parent)===astKey(body)||e.ast.parent?.type==='decorated_definition'&&astKey(e.ast.parent.parent)===astKey(body)));
+   const overrides=new Set();
+   for(const e of methods){
+    walk(e.ast,n=>{
+     if(!['assignment','assignment_expression','augmented_assignment','augmented_assignment_expression'].includes(n.type))return;
+     const left=n.childForFieldName('left'),object=left?.childForFieldName('object')?.text;
+     if(object!==(language==='python'?patternNames(e.ast.childForFieldName('parameters'))[0]:'this'))return;
+     const field=left?.childForFieldName('attribute')?.text??left?.childForFieldName('property')?.text;if(field)overrides.add(field);
+    },n=>n!==e.ast&&((definitions.has(n.type)&&n.type!=='arrow_function')||isClass(n)));
+   }
+   for(const e of methods){
+    const decorators=e.ast.parent?.type==='decorated_definition'?e.ast.parent.namedChildren.filter(n=>n.type==='decorator').map(n=>n.text):[];
+    methodInfo.set(astKey(e.ast),{entry:e,methods,className:item.name,decorators,static:/^\s*static\b/.test(e.ast.text)||decorators.some(text=>/@(?:staticmethod|classmethod)\b/.test(text)),receiver:patternNames(e.ast.childForFieldName('parameters'))[0],overrides});
+   }
+  }
+  function receiverMethod(ast){
+   for(let current=ast;current;current=current.parent){
+    if(methodInfo.has(astKey(current)))return methodInfo.get(astKey(current));
+    if(language!=='python'&&definitions.has(current.type)&&current.type!=='arrow_function')return null;
+    if(isClass(current))return null;
+   }
+   return null;
+  }
+  const constructionClasses=new Map();
+  function passesObjectValue(ast,name){
+   if(ast?.type==='identifier')return ast.text===name;
+   if(!['argument_list','keyword_argument','parenthesized_expression','list','tuple','set','dictionary','pair','list_splat','dictionary_splat'].includes(ast?.type))return false;
+   return ast.namedChildren.some(child=>passesObjectValue(child,name));
+  }
+  if(language==='python'){
+   let dynamicReplacement=false;
+   walk(tree.rootNode,n=>{if(n.type==='call'&&['setattr','delattr','exec','eval'].includes(n.childForFieldName('function')?.text))dynamicReplacement=true;});
+   for(const item of classes){
+    if(dynamicReplacement||item.ast.parent?.type!=='module'||item.ast.childForFieldName('superclasses'))continue;
+    const binding=bindingInfo.resolve(bindingInfo.moduleScope,item.name);
+    if(binding.status==='candidate'||binding.binding?.kind!=='class'||binding.binding.line!==item.ast.startPosition.row+1)continue;
+    const methods=[...methodInfo.values()].filter(info=>info.className===item.name);
+    if(methods.some(info=>['__new__','__getattr__','__getattribute__','__setattr__'].includes(info.entry.ast.childForFieldName('name')?.text)))continue;
+    const initializers=methods.filter(info=>info.entry.ast.childForFieldName('name')?.text==='__init__');
+    if(initializers.length!==1||initializers[0].decorators.length)continue;
+    const methodNames=new Set(methods.map(info=>info.entry.ast.childForFieldName('name')?.text));
+    if(methodNames.size!==methods.length)continue;
+    let overridden=methods.some(info=>[...info.overrides].some(name=>methodNames.has(name)||['__class__','__dict__'].includes(name)));
+    walk(tree.rootNode,n=>{
+     if(n.type==='call'&&passesObjectValue(n.childForFieldName('arguments'),item.name))overridden=true;
+     if(!['assignment','augmented_assignment','delete_statement'].includes(n.type))return;
+     const left=n.childForFieldName('left')??n.namedChildren[0];
+     if(left?.type==='attribute'&&left.childForFieldName('object')?.text===item.name)overridden=true;
+     if(n.type==='delete_statement'&&left?.text===item.name||n.childForFieldName('right')?.type==='identifier'&&n.childForFieldName('right').text===item.name)overridden=true;
+     if(left)walk(left,part=>{if(part.type==='attribute'&&part.childForFieldName('attribute')?.text==='__dict__')overridden=true;});
+    });
+    const classFields=entries.find(e=>e.classInit&&e.node.scope===item.name)?.node.classDefinition?.fields??[];
+    if(overridden||classFields.some(name=>methodNames.has(name)))continue;
+    constructionClasses.set(item.name,{item,methods,binding:binding.binding,initializerId:initializers[0].entry.node.id});
+   }
+  }
+  function constructionFor(scope,name){
+   const proof=constructionClasses.get(name),resolved=bindingInfo.resolve(scope,name);
+   return proof&&resolved.status!=='candidate'&&resolved.binding===proof.binding?proof:null;
+  }
+  function instanceFor(scope,name,callAst){
+   const resolved=bindingInfo.resolve(scope,name),assignment=bindingInfo.assignmentSources.get(resolved.binding);
+   if(resolved.status==='candidate'||!assignment||assignment.type!=='assignment'||assignment.endIndex>=callAst.startIndex)return null;
+   const container=assignment.parent?.parent;
+   if(container?.type!=='module'&&!(container?.type==='block'&&container.parent?.type==='function_definition'))return null;
+   const rhs=assignment.childForFieldName('right'),fn=rhs?.childForFieldName('function');
+   if(rhs?.type!=='call'||fn?.type!=='identifier')return null;
+   const proof=constructionFor(bindingInfo.at.get(astKey(rhs))??scope,fn.text);if(!proof)return null;
+   let invalid=false;
+   walk(tree.rootNode,n=>{
+    const left=['assignment','augmented_assignment','delete_statement'].includes(n.type)?n.childForFieldName('left')??n.namedChildren[0]:null;
+    if(left?.type==='attribute'&&left.childForFieldName('object')?.text===name)invalid=true;
+    if(n.type==='delete_statement'&&left?.text===name||n.type==='assignment'&&n.childForFieldName('right')?.type==='identifier'&&n.childForFieldName('right').text===name)invalid=true;
+    if(n.type==='call'&&passesObjectValue(n.childForFieldName('arguments'),name))invalid=true;
+   });
+   return invalid?null:proof;
+  }
+  const constructionMetadata=proof=>({className:proof.item.name,initializerId:proof.initializerId,result:'new_instance',dependency:'initialization',assumption:'On successful construction of this static local class with no observed replacement, the result is the instance, not the __init__ return value; runtime monkey-patching is unverified.'});
+  const callScopes=new WeakMap(),callAsts=new WeakMap();
   for(const entry of entries){
    const {ast,node}=entry;const lexical=bindingInfo.at.get(astKey(ast))??bindingInfo.moduleScope;node.references=[];node.scopeBindings=bindingInfo.flatten(lexical);node.bindings=bindingInfo.scopes.filter(s=>s===lexical||s.kind==='block'&&s.name.startsWith(lexical.name+'#')).flatMap(s=>[...s.bindings.values()].flat());
    walk(ast,n=>{
@@ -222,26 +347,28 @@ export async function analyzeFiles(files){
     if(factTypes.has(n.type))node.facts.push({line:relative,kind:n.type,text:n.text});
     if(node.classContext&&['attribute','member_expression'].includes(n.type)){
      const object=n.childForFieldName('object')?.text,field=n.childForFieldName('attribute')?.text??n.childForFieldName('property')?.text;
-     const ctx=node.classContext,owner=nodes.find(candidate=>candidate.id===ctx.initializationNodeId);
-     const detail=owner?.classDefinition?.fieldDetails.find(item=>item.name===field);
-     let receiver=false;
-     if(detail&&object==='this'&&language!=='python')receiver=ctx.methodStatic===detail.static;
-     if(detail&&object==='self'&&language==='python'&&!ctx.methodStatic&&ctx.receiver==='self'){
-      const resolved=bindingInfo.resolve(bindingInfo.at.get(astKey(n))??lexical,'self');receiver=resolved.binding?.kind==='parameter'&&resolved.status!=='candidate';
-     }
-     if(detail&&object===ctx.name){const resolved=bindingInfo.resolve(bindingInfo.at.get(astKey(n))??lexical,object);receiver=detail.static&&resolved.binding?.kind==='class'&&resolved.binding.ownerId===ctx.initializationNodeId&&resolved.status!=='candidate';}
-     if(receiver){
-      const parent=n.parent,left=parent?.childForFieldName('left');
-      const plainAssignment=['assignment','assignment_expression'].includes(parent?.type)&&left&&astKey(left)===astKey(n);
-      if(!plainAssignment){
-       const readWrite=['update_expression','augmented_assignment','augmented_assignment_expression'].includes(parent?.type)&&(!left||astKey(left)===astKey(n));
-       node.references.push({targetId:ctx.initializationNodeId,kind:'class_state',line:relative,object,field,access:readWrite?'read_write':'read'});
+     const ctx=node.classContext;
+     for(const detail of ctx.fieldOwners??[]){
+      if(detail.name!==field)continue;
+      let receiver=false;
+      if(object==='this'&&language!=='python')receiver=ctx.methodStatic===detail.static;
+      if(object===ctx.receiver&&language==='python'&&!ctx.methodStatic){
+       const resolved=bindingInfo.resolve(bindingInfo.at.get(astKey(n))??lexical,object);receiver=resolved.binding?.kind==='parameter'&&resolved.status!=='candidate';
+      }
+      if(object===ctx.name){const resolved=bindingInfo.resolve(bindingInfo.at.get(astKey(n))??lexical,object);receiver=detail.static&&resolved.binding?.kind==='class'&&resolved.binding.ownerId===detail.ownerId&&resolved.status!=='candidate';}
+      if(receiver){
+       const parent=n.parent,left=parent?.childForFieldName('left');
+       const plainAssignment=['assignment','assignment_expression'].includes(parent?.type)&&left&&astKey(left)===astKey(n);
+       if(!plainAssignment&&detail.ownerId!==node.id){
+        const readWrite=['update_expression','augmented_assignment','augmented_assignment_expression'].includes(parent?.type)&&(!left||astKey(left)===astKey(n));
+        node.references.push({targetId:detail.ownerId,kind:'class_state',line:relative,object,field,access:readWrite?'read_write':'read',stateOrigin:detail.kind});
+       }
       }
      }
     }
     if(n.type==='call'||n.type==='call_expression'){
      const fn=n.childForFieldName('function'),name=fn?.text??'';
-     const call={name,line:relative,arguments:n.childForFieldName('arguments')?.text??'',targetId:null,status:'unresolved'};node.calls.push(call);callScopes.set(call,bindingInfo.at.get(astKey(n))??lexical);
+     const call={name,line:relative,arguments:n.childForFieldName('arguments')?.text??'',resultUse:callResultUse(n),targetId:null,status:'unresolved'};node.calls.push(call);callScopes.set(call,bindingInfo.at.get(astKey(n))??lexical);callAsts.set(call,n);
     }
    }, n=>n!==ast && (definitions.has(n.type)||['class_definition','class_declaration'].includes(n.type)));
    for(const call of node.calls){
@@ -251,16 +378,55 @@ export async function analyzeFiles(files){
     call.shadowed=!!resolved.binding&&resolved.binding.kind!=='import'&&!resolved.targetId;
     if(resolved.binding?.kind==='import')call.importBinding={source:resolved.binding.source,imported:resolved.binding.imported,local:resolved.binding.local,kind:resolved.binding.importKind??resolved.binding.importType??fileInfo.imports.find(i=>i.local===base&&i.source===resolved.binding.source)?.kind,line:resolved.binding.line,level:resolved.binding.level,typeOnly:resolved.binding.typeOnly};
     if(/^[A-Za-z_$][\w$]*$/.test(call.name)&&resolved.targetId){call.targetId=resolved.targetId;call.status='confirmed_same_file';}
-    else if(call.name.startsWith('self.')&&node.scope){const candidates=entries.filter(e=>e.node.name===`${node.scope}.${call.name.slice(5)}`);if(candidates.length===1){call.targetId=candidates[0].node.id;call.status='confirmed_same_file';}else if(candidates.length>1)call.status='ambiguous';}
+    else if(language==='python'&&/^[A-Za-z_]\w*$/.test(call.name)&&constructionFor(callScope,call.name)){
+     const proof=constructionFor(callScope,call.name);call.targetId=proof.initializerId;call.status='confirmed_local_construction';call.shadowed=false;call.construction=constructionMetadata(proof);
+    }
+    else if(/^(?:this|self)\.[A-Za-z_$][\w$]*$/.test(call.name)){
+     const owner=receiverMethod(ast),member=call.name.slice(call.name.indexOf('.')+1);
+     const receiverValid=owner&&(language==='python'?!owner.static&&base===owner.receiver&&resolved.binding?.kind==='parameter'&&resolved.binding.scope===owner.entry.node.name&&resolved.status!=='candidate':base==='this');
+     const fieldOverride=owner&&(owner.overrides.has(member)||owner.entry.node.classContext?.fieldNames?.includes(member));
+     if(receiverValid&&!fieldOverride){
+      const matching=owner.methods.filter(e=>e.ast.childForFieldName('name')?.text===member);
+      const candidates=owner.methods.filter(e=>{const info=methodInfo.get(astKey(e.ast));return e.ast.childForFieldName('name')?.text===member&&(language==='python'?(!info.static&&!info.decorators.length||info.decorators.length===1&&info.decorators[0]==='@staticmethod'&&!bindingInfo.resolve(callScope,'staticmethod').binding):info.static===owner.static);});
+      if(language==='python'&&matching.length>1||candidates.length>1)call.status='ambiguous';
+      else if(candidates.length===1){call.targetId=candidates[0].node.id;call.status='confirmed_same_file';call.shadowed=false;}
+     }
+    }
+    else if(language==='python'&&/^[A-Za-z_]\w*\.[A-Za-z_]\w*$/.test(call.name)){
+     const proof=instanceFor(callScope,base,callAsts.get(call)),member=call.name.split('.')[1];
+     const candidates=proof?.methods.filter(info=>info.entry.ast.childForFieldName('name')?.text===member&&(!info.decorators.length||info.decorators.length===1&&info.decorators[0]==='@staticmethod'&&!bindingInfo.resolve(callScope,'staticmethod').binding))??[];
+     if(candidates.length===1){call.targetId=candidates[0].entry.node.id;call.status='confirmed_local_instance';call.shadowed=false;call.instanceProvenance=constructionMetadata(proof);}
+     else if(candidates.length>1)call.status='ambiguous';
+    }
     else if(resolved.status==='candidate')call.status='candidate';
+    if(!call.targetId&&call.status==='unresolved'&&resolved.status==='candidate')call.status='candidate';
    }
    node.externalContracts=[];
    if(language==='python')for(const call of node.calls.filter(c=>c.name==='print'&&!c.targetId&&!bindingInfo.resolve(callScopes.get(c)??lexical,'print').binding)){
     call.status='standard_builtin_contract';
-    node.externalContracts.push({name:'print',input:'objects plus optional sep/end/file/flush',process:'Convert supplied objects to strings and write to file; defaults are sep=space, end=newline, file=sys.stdout.',output:'Observable text output; return None.',source:'https://docs.python.org/3/library/functions.html#print',assumption:'Standard Python builtins without runtime monkey-patching; lexical bindings were excluded.'});
+    node.externalContracts.push({name:'print',input:'objects plus optional sep/end/file/flush',process:'Convert supplied objects to strings and write to file; defaults are sep=space, end=newline, file=sys.stdout.',output:'Observable text output; return None.',returns:['None'],effects:['텍스트 출력 요청'],source:'https://docs.python.org/3/library/functions.html#print',assumption:'Standard Python builtins without runtime monkey-patching; lexical bindings were excluded.'});
+   }
+   if(language==='python')for(const call of node.calls){
+    const contract=getPythonBuiltinContract(call,{language,lexicalUnshadowed:!bindingInfo.resolve(callScopes.get(call)??lexical,call.name).binding});
+    if(contract){call.status='standard_builtin_contract';node.externalContracts.push(contract);}
+   }
+   if(language==='python')for(const call of node.calls){
+    const callAst=callAsts.get(call),fn=callAst?.childForFieldName('function'),method=fn?.childForFieldName('attribute')?.text;
+    if(call.targetId||!['mkdir','with_suffix','unlink','open','is_file','resolve'].includes(method)||fn?.type!=='attribute')continue;
+    const proof=declaredPathReceiverProof(ast,fn.childForFieldName('object'),callAst,{resolveAt:(at,name)=>bindingInfo.resolve(bindingInfo.at.get(astKey(at))??lexical,name)});
+    if(proof){call.declaredPathProvenance=proof;call.declaredPathMethod=method;}
    }
    node.references=node.references.filter((reference,index,all)=>all.findIndex(item=>item.targetId===reference.targetId&&item.line===reference.line&&item.object===reference.object&&item.field===reference.field&&item.access===reference.access)===index);
    node.facts=node.facts.filter((f,i,a)=>a.findIndex(x=>x.line===f.line&&x.kind===f.kind&&x.text===f.text)===i);
+  }
+  // Lexical callback ownership is a definition reference, never evidence of invocation.
+  for(const child of entries.filter(e=>['arrow_function','function_expression'].includes(e.ast.type))){
+   let parent=child.ast.parent,owner=null;
+   while(parent){owner=entries.find(e=>!e.classInit&&!e.top&&astKey(e.ast)===astKey(parent));if(owner)break;if(isClass(parent))break;parent=parent.parent;}
+   if(!owner&&!parent)owner=entries.find(e=>e.top);
+   if(!owner)continue;
+   const line=owner.node.lineMap.indexOf(child.ast.startPosition.row+1)+1;
+   if(line>0)owner.node.references.push({targetId:child.node.id,kind:'callback_definition',line,relationship:'lexical_definition',invocation:false});
   }
   tree.delete();parser.delete();
  }

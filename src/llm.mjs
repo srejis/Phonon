@@ -11,11 +11,21 @@ import {validateMeaningLanguage} from './meaning-language.mjs';
 export const meaningSchema=z.object({id:z.string(),input:z.array(z.string()),process:z.array(z.string()),output:z.array(z.string()),childUses:z.array(z.object({childId:z.string(),description:z.string()}).strict()),uncertainty:z.array(z.string()),evidence:z.array(z.object({line:z.number().int(),claim:z.string()}).strict()),ownerChecks:z.array(z.object({section:z.enum(['input','process','output','childUses']),index:z.number().int().nonnegative(),ownerId:z.string()}).strict())}).strict();
 const schema=meaningSchema;
 export const groupSchema=z.object({id:z.string(),members:z.array(meaningSchema)}).strict();
+// Wire output contains meaning only; canonical stored records retain strict host-owned traces.
+export const meaningOutputSchema=meaningSchema.omit({ownerChecks:true}).strict();
+export const groupOutputSchema=z.object({id:z.string(),members:z.array(meaningOutputSchema)}).strict();
+export function deriveMeaningOwnership(payload,kind){
+ const wire=(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema).parse(payload);
+ const project=member=>({...member,ownerChecks:['input','process','output','childUses'].flatMap(section=>
+  member[section].map((_,index)=>({section,index,ownerId:section==='childUses'?member.childUses[index].childId:member.id}))) });
+ return kind==='dependency_group'?groupSchema.parse({...wire,members:wire.members.map(project)}):meaningSchema.parse(project(wire));
+}
+
 const encoding=getEncoding('o200k_base');
 const MODEL='gpt-6-luna';
 export function meaningProfile(kind,maxOutputTokens){
  const dependencies=JSON.parse(fs.readFileSync(path.join(ROOT,'package.json'),'utf8')).dependencies;
- return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort:'none',maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupSchema:meaningSchema)};
+ return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort:'none',maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',ownershipTraceOrigin:'host_projection',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema)};
 }
 const stopPath=path.join(ROOT,'.local','api-stop.json');
 export function clearAPIStop(){if(fs.existsSync(stopPath))fs.unlinkSync(stopPath);}
@@ -45,13 +55,13 @@ export async function explain(request,node,children,round){
  if(round.plan.stopped)throw new Error('Round stopped after API failure');
  secretCheck(request.input);secretCheck(request.instructions);
  const profile=meaningProfile(node.kind,round.plan.limits.maxOutputTokens);
- const outputSchema=node.kind==='dependency_group'?groupSchema:schema;
+ const outputSchema=node.kind==='dependency_group'?groupOutputSchema:meaningOutputSchema;
  const estimate=encoding.encode(request.instructions+'\n'+request.input+'\n'+JSON.stringify(z.toJSONSchema(outputSchema))).length+256;
  if(estimate>round.plan.limits.maxInputTokens)throw new Error('Input exceeds assigned estimated token limit');
  if(round.plan.calls>=round.plan.limits.maxCalls)throw new Error('Assigned call limit reached');
  let key;try{key=designatedKey();}catch{const failure={status:'auth_blocked',reason:'Designated key unavailable or invalid',at:new Date().toISOString()};round.plan.stopped=true;round.save();fs.writeFileSync(stopPath,JSON.stringify(failure));throw new APIFailure(failure);}setTracingDisabled(true);
  let attempts=0;
- const record={nodeId:node.id,model:MODEL,startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
+ const record={nodeId:node.id,model:MODEL,ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
  const log=()=>fs.appendFileSync(path.join(round.dir,'calls.jsonl'),JSON.stringify(record)+'\n');
  const client=new OpenAI({apiKey:key,baseURL:'https://api.openai.com/v1',organization:null,project:null,maxRetries:0,timeout:45000,
  fetch:async(url,init)=>{
@@ -87,7 +97,8 @@ export async function explain(request,node,children,round){
  const text=(typeof result.finalOutput==='string'?result.finalOutput:JSON.stringify(result.finalOutput??null)).replace(/^```(?:json)?\s*|\s*```$/g,'');
  try{
   const payload=JSON.parse(text);
-  const meaning=node.kind==='dependency_group'?{id:node.id,members:validateGroupMeaning(payload,node,children)}:schema.parse(payload);
+  const canonical=deriveMeaningOwnership(payload,node.kind);
+  const meaning=node.kind==='dependency_group'?{id:canonical.id,members:validateGroupMeaning(canonical,node,children)}:schema.parse(canonical);
   if(meaning.id!==node.id)throw new Error('Node ID mismatch');
   if(node.kind!=='dependency_group'){
   const expected=new Set(children.map(c=>c.id));

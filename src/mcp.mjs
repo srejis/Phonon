@@ -1,3 +1,4 @@
+import {MIN_INPUT_TOKENS,MAX_INPUT_TOKENS,DEFAULT_INPUT_TOKENS} from './analysis-budget.mjs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -35,18 +36,20 @@ export function createPhononServer(engine = defaultEngine) {
     annotations: {readOnlyHint: true}
   }, safe(({projectId}) => engine.getStatus(projectId)));
   server.registerTool('request_analysis', {
-    description: 'Start bounded asynchronous project analysis. maxCalls defaults to 0, so omitted budget never authorizes paid model calls. Poll analysis_status for completion.',
+    description: 'Start bounded asynchronous project analysis. maxCalls defaults to 0, so omitted budget never authorizes paid model calls. File and node selections form a union, expanded to required dependency context. Poll analysis_status for completion.',
     inputSchema: {
       projectId: identifier(),
-      files: z.array(identifier()).max(64).optional(),
+      files: z.array(identifier()).optional(),
+      nodeIds: z.array(identifier()).optional(),
       maxCalls: z.number().int().min(0).max(24).default(0),
-      maxInputTokens: z.number().int().min(256).max(6000).optional(),
+      maxInputTokens: z.number().int().min(MIN_INPUT_TOKENS).max(MAX_INPUT_TOKENS).optional(),
       maxOutputTokens: z.number().int().min(64).max(2000).optional()
     }
-  }, safe(({projectId, files, maxCalls = 0, maxInputTokens, maxOutputTokens}) =>
+  }, safe(({projectId, files, nodeIds, maxCalls = 0, maxInputTokens, maxOutputTokens}) =>
     engine.requestAnalysis(projectId, {
       maxCalls,
       ...(files === undefined ? {} : {files}),
+      ...(nodeIds === undefined ? {} : {nodeIds}),
       ...(maxInputTokens === undefined ? {} : {maxInputTokens}),
       ...(maxOutputTokens === undefined ? {} : {maxOutputTokens})
     })

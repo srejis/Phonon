@@ -1,11 +1,12 @@
 /** H3: one-pass claim ownership ledger. No I/O or model calls. */
 export const hypothesis = Object.freeze({
   id: 'h3',
-  version: 11,
+  version: 16,
   name: 'Ownership ledger with single-pass owner checks',
-  strategy: 'Separate local evidence from child-owned claims; report ownership in the same response.'
+  strategy: 'Separate local evidence from child-owned claims; check ownership internally in the same response; host projects the trace.'
 });
 
+const escapeRegex = value => Array.from(String(value)).map(ch => '.+*?^$()[]{}|'.includes(ch) || ch.charCodeAt(0) === 92 ? String.fromCharCode(92) + ch : ch).join('');
 const list = value => Array.isArray(value) ? value : [];
 const printable = value => value == null ? '' : String(value);
 
@@ -16,21 +17,13 @@ export function buildRequest(node, children = []) {
     if (!child || child.id == null) throw new TypeError(`H3 child ${index} requires id`);
     const childId = printable(child.id);
     const claims = ['input', 'process', 'output'].flatMap(section =>
-      list(child[section]).map((claim, claimIndex) => ({
-        claimId: `${childId}:${section}:${claimIndex}`,
-        ownerId: childId,
-        section,
-        claim: printable(claim),
-        useAtParent: 'Reference this responsibility in childUses; do not restate its internal mechanics as a local claim.'
-      }))
+      list(child[section]).map(claim => ({section, claim: printable(claim)}))
     );
     return {
       id: childId,
       name: printable(child.name),
       claims,
-      childUses: list(child.childUses),
-      uncertainty: list(child.uncertainty),
-      evidence: list(child.evidence)
+      uncertainty: list(child.uncertainty)
     };
   });
   const allowedChildIds = childRecords.map(child => child.id);
@@ -43,18 +36,20 @@ export function buildRequest(node, children = []) {
     name: printable(node.name),
     language: printable(node.language),
     location: {file: printable(node.file), startLine: node.startLine ?? null, endLine: node.endLine ?? null},
-    source: printable(node.source),
+    source: printable(node.source).split(/\r?\n/).map((text,index)=>({line:(node.startLine??1)+index,text})),
     ownership: node.ownership ?? null,
     classDefinition: node.classDefinition ?? null,
     classContext: node.classContext ?? null,
+    typeContext: node.typeContext ?? null,
+    importedSymbols: list(node.scopeBindings).filter(binding=>binding.kind==='import'&&new RegExp('\\b'+escapeRegex(binding.name)+'\\b').test(node.source??'')).map(({line,...binding})=>binding),
+    ...(node.language==='css'?{cssContext:node.cssContext??[]}:{}),
+    ...(node.language==='sql'?{sqlDialect:node.sqlDialect,sqlDialectBasis:node.sqlDialectBasis}:{}),
     referenceSites: list(node.references),
     externalContracts: list(node.externalContracts),
     unresolvedCalls: list(node.calls).filter(call =>
       call.targetId == null && !list(node.externalContracts).some(contract => contract.name === call.name)
     ).map(call => ({name: printable(call.name), line: call.line ?? null})),
-    directFacts: list(node.facts).map((fact, index) => ({
-      factId: `${nodeId}:fact:${index}`,
-      ownerId: nodeId,
+    directFacts: list(node.facts).map(fact => ({
       line: fact.line ?? null,
       kind: printable(fact.kind),
       text: printable(fact.text)
@@ -62,7 +57,10 @@ export function buildRequest(node, children = []) {
     callSites: list(node.calls).map(call => ({
       targetId: call.targetId == null ? null : printable(call.targetId),
       name: printable(call.name),
-      line: call.line ?? null
+      line: call.line ?? null,
+      arguments:call.arguments??'',resultUse:call.resultUse??'unknown',declaredPathProvenance:call.declaredPathProvenance??null,
+      construction:call.construction??null,
+      instanceProvenance:call.instanceProvenance??null
     }))
   };
 
@@ -73,8 +71,7 @@ Return one JSON object only. Do not call tools, request another model pass, or a
 The schema is:
 {"id":string,"input":string[],"process":string[],"output":string[],
  "childUses":[{"childId":string,"description":string}],"uncertainty":string[],
- "evidence":[{"line":number,"claim":string}],
- "ownerChecks":[{"section":"input"|"process"|"output"|"childUses","index":number,"ownerId":string}]}
+ "evidence":[{"line":number,"claim":string}]}
 Set id to the current node id. Write all explanations in Korean, preserving code identifiers.
 
 Ownership rules:
@@ -83,12 +80,13 @@ Ownership rules:
    Never merely list variable names. Destructured bindings are fields read from an object/array
    parameter: distinguish the parent container and selected fields from a scalar parameter.
    For Label({name}), describe name as a field of the object argument, not as the parameter
-   itself. Preserve the source-level object/array contract. Preserve explicitly declared parameter/field types when the source supplies them (e.g. {name: string}); do not infer missing field/value types. Do not classify local literals, local constants, or
+   itself. Inspect typeContext.declarations for source-defined alias/interface fields, class-field annotations, and explicit union/intersection contracts. These declarations are type contracts, not extra runtime operations. Never claim imported/unresolved type structures or runtime type validation from annotations. Evidence for a type contract may cite the current parameter/annotation using it; do not cite an external declaration as a current-node source row. Preserve the source-level object/array contract. Preserve explicitly declared parameter/field types when the source supplies them (e.g. {name: string}); do not infer missing field/value types. Do not classify local literals, local constants, or
    intermediate computed values as external input. A top-level call with literals 2 and 3
    has no external input merely because it prepares arguments. Describe such local setup
    in process; describe function parameters in input by their role in that function.
    Input also includes pre-existing external state actually read by this node, separately from
-   parameters: receiver fields, module/class state, and other evidenced external dependencies.
+   parameters: receiver fields, module/class state, and other evidenced external dependencies. When a resource query is actually used (e.g. candidate.path.stat().st_mtime_ns for selection), identify the queried external state and its exact use separately from local intermediates; preserve the source expression when its library contract is unconfirmed, without claiming query success or inventing data.
+   In INPUT separately account for the pre-existing resource information actually queried and used: a path parameter supplies an address, while file contents, existence/type status, and stat metadata supply different information. Local assignment of a query result does not turn that external information into a local literal. Preserve exact source query/property expressions when their contract is unconfirmed, without assuming actual values or success. A process/uncertainty mention alone does not account for state input.
    A read-modify-write such as this.value += step requires both the parameter step and the
    existing instance field this.value; mentioning the field only while describing step does
    not account for that state input. Describe the current field's use, not its child's initial
@@ -97,11 +95,12 @@ Ownership rules:
    Inspect localLedger first. Own only behavior directly implemented by this node: its input
    acquisition, argument preparation, expressions, comparisons, branch conditions, sequencing,
    state writes, transformations, and return/output assembly. Facts are hints, not a substitute
-   for the source. Keep concrete formulas and conditions, including directly implemented work
-   before and after calls. Do not reduce the parent to a vague orchestrator.
+   for the source. Preserve every directly owned stage in chained expressions (e.g. hexdigest before slicing), exact regex character sets and replacements, repeated open/resource acquisitions and their separate uses, and exact caught exception classes. Do not replace an owned formula or criterion with phrases such as specified characters or exception occurred. Preserve explicitly declared type identifiers in input, alongside their role. Keep concrete formulas and conditions, including directly implemented work
+   before and after calls. Imports executed inside this node belong to its own process, including their location inside try/branches; do not silently drop them or broaden an import-only exception guard to later calls. Do not reduce the parent to a vague orchestrator.
 2. Inspect childOwnershipLedger as already owned responsibilities. Its claims may include
    internal details to recognize ownership, but such details belong to that child. Use the
    parent's call/reference sites and arguments or referenced fields to describe the role of each child in childUses.
+   A call site with construction metadata depends on the initializer responsibility, but a successful class construction produces the new instance, NOT the initializer method return. Describe initializer child use as initialization; retain the caller's argument preparation and instance assignment locally, without copying initialized field formulas. Respect supplied construction assumptions; do not assert actual success or runtime class identity from static proof.
    Do not copy child internal algorithms, branches, formulas, or nested calls into this node's
    input/process/output. A parent's own formula surrounding a child call remains parent-owned.
 3. Avoid repeating the same claim between input, process, output, or childUses. Describe the
@@ -137,14 +136,13 @@ Ownership rules:
    gets one childUses entry covering those uses. If a supplied child cannot be linked to a direct
    call OR reference, retain its id and state that linkage
    is unconfirmed; also record that uncertainty. Do not invent a call or reference relationship.
-5. Within this SAME response, perform an ownership check of each emitted input, process,
-   output, and childUses description. ownerChecks must reference each emitted item exactly
-   once by its section and zero-based index, with ownerId=current node id for local
-   input/process/output claims and ownerId=childId for childUses responsibilities. Never
-   repeat claim text in ownerChecks. Rewrite or remove misplaced / duplicate local claims before
-   producing the final JSON. ownerChecks is a trace of ownership, not a claim of correctness.
+5. Within this SAME response, internally check the ownership of each input, process, output,
+   and childUses description. Rewrite/remove misplaced or duplicate local claims before finalizing.
+   Do NOT emit ownerChecks, section/index bookkeeping, or claim-copy audit text. The host projects
+   canonical ownerChecks using section, zero-based index and the local id / childId afterward.
+   This mechanical trace does not prove that the explanation or its ownership is correct.
 6. Evidence must tie concrete local claims to the current node's supplied normalized source lines.
-   Use normalized current-node source coordinates within location.startLine/endLine only in
+   localLedger.source contains explicit numbered rows. Cite the exact row containing the claimed operation, condition, or except clause. Split a condition, its following return, and an except clause into distinct evidence entries instead of attaching a multi-row claim to a nearby assignment. Use normalized current-node source coordinates within location.startLine/endLine only in
    evidence.line. The host maps these coordinates to original file lines later; never infer
    original offsets in the response. Never place line numbers or phrases
    such as 'line 2' / '2행' in input, process, output, childUses descriptions, or uncertainty.
@@ -152,7 +150,16 @@ Ownership rules:
    the parent. When source numbering or meaning cannot be established, add uncertainty instead
    of fabricated line numbers. Evidence may cite a local call/reference-site line for childUses, but that
    line proves the call/reference and local argument/result or state-use relationship, not child implementation.
-7. Inspect localLedger.externalContracts alongside source call sites. These are supplied,
+7. Preserve AST callSites.resultUse: ignored means the callee return value is discarded and must
+   NOT become this node's output. Retain its proven requested effects (e.g. directory creation,
+   copy, replacement, cleanup), separately from returns. local_use feeds local processing;
+   direct_return is the actual return-site result; raised constructs the exception used by raise.
+   Declared Path contracts are conditional on the actual argument conforming to the source
+   annotation and standard pathlib remaining unchanged; annotations do not enforce runtime types.
+   Name the actual guard variables (e.g. search_root), not vague 'that path' references. Preserve
+   exact return-site conditions: a cache miss is not an early None return unless source shows it.
+   Trace each actual return/cleanup branch, including repeated open and finally cleanup, separately.
+   Inspect localLedger.externalContracts alongside source call sites. These are supplied,
    confirmed external contracts; use their input/process/output and source provenance only for
    matching calls. State observable effects such as stdout display, file writes, or state
    changes in output, including effects that have no return value. Do not stop at argument
@@ -197,7 +204,7 @@ Ownership rules:
 
 Evidence precision: split a condition and a return on different rows into separate evidence entries; each claim describes only the fact supported by its exact cited row. Before finalizing, check that requiredChildIds are preserved, every local formula and condition
 is accounted for, externally read state is present in input separately from parameters, directly evidenced state writes and observable effects from confirmed contracts appear in output, every unresolved
-call appears in uncertainty, every claim has an owner check, and child mechanics have not leaked into the
+call appears in uncertainty, every claim has been internally checked for ownership, and child mechanics have not leaked into the
 local sections. This is the only model response and no later verification response is available.`;
 
   return {

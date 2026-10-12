@@ -45,4 +45,3 @@ export function getPythonModuleContract(call,{language,lexicalImportVerified=fal
  const effects={'os.path.normcase':[],'os.replace':['src에서 dst로 파일 이름 변경/교체 요청'],'shutil.copy2':['파일 내용 복사 및 지원되는 메타데이터 보존 시도'],'hashlib.sha1':[]};
  return {name:call.name,canonicalName,...contracts[canonicalName],returns:returns[canonicalName],effects:effects[canonicalName],assumption};
 }
-

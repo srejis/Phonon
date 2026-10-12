@@ -45,4 +45,3 @@ test('empty categories produce an empty host trace, and unexpected model fields 
  const value={id:'a',input:[],process:[],output:[],childUses:[],uncertainty:[],evidence:[]};assert.deepEqual(deriveMeaningOwnership(value).ownerChecks,[]);
  assert.throws(()=>deriveMeaningOwnership({...value,extra:true}));assert.throws(()=>deriveMeaningOwnership({id:'g',members:[{...value,ownerChecks:[]}]},'dependency_group'));
 });
-

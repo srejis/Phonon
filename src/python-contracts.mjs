@@ -8,6 +8,7 @@ const records={
  next:{name:'next',input:'iterator와 실제로 지정된 default',process:'iterator의 다음 항목을 요청하여 소비하고, 소진 시 지정된 default를 사용',output:'다음 항목 또는 소진 시 default; default가 없으면 StopIteration',source:functions+'next'},
  any:{name:'any',input:'원소의 참/거짓을 검사할 iterable',process:'참인 원소를 찾는 즉시 True로 종료하고 그때까지 iterable을 소비',output:'하나라도 참이면 True, 모두 거짓이거나 비어 있으면 False',source:functions+'any'},
  max:{name:'max',input:'하나의 iterable 또는 둘 이상의 비교 대상; 실제 지정된 key/default',process:'기본 비교 또는 key 결과에 따라 가장 큰 항목 선택; 최댓값이 동률이면 먼저 나타난 항목 선택',output:'선택된 원래 항목; 빈 iterable이면 지정 default, 없으면 ValueError',source:functions+'max'},
+ min:{name:'min',input:'하나의 iterable 또는 둘 이상의 비교 대상; 실제 지정된 keyword-only key/default',process:'기본 비교 또는 한 인자를 받는 key 함수의 결과에 따라 가장 작은 항목 선택; 최솟값이 동률이면 먼저 나타난 항목 선택',output:'선택된 원래 항목; 단일 iterable이 비어 있으면 지정 default, 없으면 ValueError; key=None은 기본 비교',source:'https://docs.python.org/3.14/library/functions.html#min'},
  ValueError:{name:'ValueError',input:'예외 생성자에 전달하는 메시지 등 인자',process:'주어진 인자를 보관하는 ValueError 예외 객체 생성; 생성 자체와 raise 문에 의한 예외 발생은 구별',output:'ValueError 객체; 실제 예외 발생은 호출 바깥의 raise 문 근거가 필요',source:'https://docs.python.org/3/library/exceptions.html#ValueError'}
 };
 for(const value of Object.values(records))Object.freeze(value);

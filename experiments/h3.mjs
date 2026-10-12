@@ -1,7 +1,7 @@
 /** H3: one-pass claim ownership ledger. No I/O or model calls. */
 export const hypothesis = Object.freeze({
   id: 'h3',
-  version: 20,
+  version: 24,
   name: 'Ownership ledger with single-pass owner checks',
   strategy: 'Separate local evidence from child-owned claims; check ownership internally in the same response; host projects the trace.'
 });
@@ -36,6 +36,73 @@ const hasPythonDefaultOrFinally = node => {
   return identifierDefault || actualFinally;
 };
 
+const hasPythonSignatureOptions = node => {
+  if (node.language !== 'python') return false;
+  const code = pythonEvidenceCode(node.parameters || printable(node.source).split(/\r?\n/)[0]);
+  return /(?<![=!<>])=(?!=)/.test(code) || /(?:^|[,(])\s*\*(?:\s*[,)]|[A-Za-z_])/.test(code);
+};
+
+const hasDeclaredInputTypeContext = node => ['ts','tsx'].includes(node.language) && list(node.typeContext?.declarations).length > 0;
+const hasJsxPropSpread = node => {
+  if (!['jsx','tsx'].includes(node.language)) return false;
+  const code = printable(node.source).replace(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\x60(?:\\[\s\S]|[^\x60\\])*\x60/g, token => token.replace(/[^\r\n]/g,' '));
+  const tags = /<[A-Za-z_$][\w$.:-]*(?=\s|\/?>)/g;
+  let tag;
+  while ((tag = tags.exec(code))) {
+    let braces = 0;
+    for (let i = tags.lastIndex; i < code.length; i++) {
+      if (code[i] === '{') {
+        if (braces === 0 && /^\{\s*\.\.\./.test(code.slice(i))) return true;
+        braces++;
+      } else if (code[i] === '}') braces = Math.max(0, braces - 1);
+      else if (code[i] === '>' && braces === 0) break;
+    }
+  }
+  return false;
+};
+
+const pythonModuleStateReads = node => {
+  if (node.language !== 'python') return [];
+  const localNames = new Set(list(node.bindings).filter(binding => binding.scope !== '<module>').map(binding => binding.name));
+  const candidates = list(node.scopeBindings).filter(binding => binding.kind === 'assignment' && binding.scope === '<module>' && !binding.targetId && typeof binding.name === 'string' && /^[A-Za-z_]\w*$/.test(binding.name) && !localNames.has(binding.name) && !list(node.scopeBindings).some(other => other.name === binding.name && (other.scope !== '<module>' || other.kind !== 'assignment' || other.targetId)));
+  if (!candidates.length) return [];
+  const rawLines = printable(node.source).split(/\r?\n/);
+  const lines = pythonEvidenceCode(node.source).split(/\r?\n/), found = new Map();
+  let rootSeen = false, header = false, nestedIndent = null;
+  for (const [index, content] of lines.entries()) {
+    let line = content;
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const indent = line.match(/^[ \t]*/)[0].replace(/\t/g,'        ').length;
+    if (nestedIndent !== null) {if (indent > nestedIndent) continue; nestedIndent = null;}
+    if (/^(?:async\s+)?def\s|^class\s/.test(trimmed)) {
+      if (!rootSeen && (!node.kind || node.kind === 'function_definition') && /^(?:async\s+)?def\s/.test(trimmed)) {rootSeen = true; header = !/:\s*$/.test(trimmed);}
+      else nestedIndent = indent;
+      continue;
+    }
+    if (header) {if (/:\s*$/.test(trimmed)) header = false; continue;}
+    if (/^(?:from\s|import\s|global\s|nonlocal\s|del\s)/.test(trimmed)) continue;
+    // Annotation-only names are not runtime state reads; retain a typed assignment's RHS.
+    if (/^\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*:/.test(line)) {
+      const assignment = line.match(/(?<![=!<>])=(?!=)/);
+      if (!assignment) continue;
+      line = line.slice(assignment.index + 1);
+    }
+    for (const binding of candidates) {
+      const names = new RegExp('\\b'+escapeRegex(binding.name)+'\\b','g');
+      let occurrence;
+      while ((occurrence = names.exec(line))) {
+        const before = line.slice(0,occurrence.index),after = line.slice(names.lastIndex);
+        if (/\.\s*$/.test(before) || /^\s*(?:=(?!=)|\()/.test(after)) continue;
+        if (!found.has(binding.name)) found.set(binding.name,{name:binding.name,kind:binding.kind,scope:binding.scope,readSites:[]});
+        const entry = found.get(binding.name), readLine = (node.startLine ?? 1) + index;
+        if (!entry.readSites.some(site=>site.line===readLine)) entry.readSites.push({line:readLine,text:rawLines[index].trim()});
+      }
+    }
+  }
+  return [...found.values()];
+};
+
 export function buildRequest(node, children = []) {
   if (!node || node.id == null) throw new TypeError('H3 requires node.id');
   const nodeId = printable(node.id);
@@ -57,6 +124,7 @@ export function buildRequest(node, children = []) {
     throw new TypeError('H3 child ids must be unique');
   }
 
+  const moduleStateReads = pythonModuleStateReads(node);
   const localLedger = {
     ownerId: nodeId,
     name: printable(node.name),
@@ -72,6 +140,12 @@ export function buildRequest(node, children = []) {
     ...(node.language==='sql'?{sqlDialect:node.sqlDialect,sqlDialectBasis:node.sqlDialectBasis}:{}),
     referenceSites: list(node.references),
     externalContracts: list(node.externalContracts),
+    ...(list(node.localLiteralGuardChecklist).length ? {localLiteralGuardChecklist:node.localLiteralGuardChecklist} : {}),
+    ...(list(node.jsxPropChecklist).length ? {jsxPropChecklist:node.jsxPropChecklist} : {}),
+    ...(list(node.writeChecklist).length ? {writeChecklist:node.writeChecklist} : {}),
+    ...(list(node.optionalAccessChecklist).length ? {optionalAccessChecklist:node.optionalAccessChecklist} : {}),
+    ...(list(node.htmlDeclarationChecklist).length ? {htmlDeclarationChecklist:node.htmlDeclarationChecklist} : {}),
+    ...(moduleStateReads.length ? {moduleStateReads} : {}),
     ...(hasPythonFinally(node) ? {effectChecklist: list(node.calls).flatMap(call =>
       list(node.externalContracts).flatMap((contract, contractIndex) =>
         contract.name === call.name && list(contract.effects).length > 0
@@ -282,7 +356,115 @@ source rows to identify their distinct roles and actual reachability; never impl
 on every path. Retain arguments/formulas and detailed sequencing in PROCESS rather than duplicating
 them in OUTPUT. Do not omit a verified creation/copy/replacement/cleanup effect merely because the
 callee return is ignored; do not expose its unused return as caller output. This checklist is an
-attention aid, not a new contract, execution result, extra model pass or quality guarantee.` : '') + '\n최종 언어 확인: 이 응답 안에서 모든 설명 필드의 문장이 한국어인지 확인한 뒤 확정하세요. 원문 코드·문자열·식별자는 그대로 유지하고, 추가 모델 호출이나 출력 후 번역 수리는 하지 마세요.',
+attention aid, not a new contract, execution result, extra model pass or quality guarantee.` : '') + (hasPythonSignatureOptions(node) ? `\n\nPython explicit signature contract:
+Read the complete source signature. In INPUT preserve every actual parameter default expression
+and keyword-only restriction (including the bare * separator or parameters after *args), alongside
+the parameter's information role and declared type. Literal defaults are parameter contracts when
+an argument is omitted, not extra external state or body literals. Identifier defaults retain their
+evidenced definition-time dependency; annotations/defaults do not guarantee actual runtime values
+or enforce types. Do not omit a default or keyword-only restriction merely because it appears in
+EVIDENCE: evidence supports the INPUT contract and is not a replacement for explaining it. Keep
+child initializer internals separate; the current node still owns its signature contract.` : '') + (hasDeclaredInputTypeContext(node) ? `\n\nDeclared input type completeness:
+For INPUT follow supplied typeContext declarations reachable from this node's actual parameter or
+read-state annotation. Preserve known required versus optional fields and their exact declared
+types, finite literal-union alternatives, and named union/intersection operands with their generic
+arguments. Naming only an alias is insufficient when its supplied declaration contains those known
+contracts. A declared intersection with an imported type is known even when that imported type's
+internal fields are unknown: keep the exact declared operand, without inventing its detailed shape.
+Do not turn annotations into runtime validation, infer unprovided literal alternatives, list unused
+declarations as input, or copy child processing. Cite the current annotation row that uses the type
+contract; supplied declarations are context, not newly invented current-node source evidence.` : '') + (hasJsxPropSpread(node) ? `\n\nJSX ordered prop construction:
+For actual JSX attribute spreads, trace the source order of explicit properties and spreads together
+with the surrounding destructuring exclusions. A later spread can replace an earlier explicit
+property only when that remaining spread object supplies the same property; a later explicit
+property replaces an earlier spread value. Preserve this locally owned precedence effect in PROCESS,
+not merely a list of forwarded property names. Do not treat an earlier explicit value as fixed after
+a later potentially overlapping spread. Do not claim keys removed by the source destructuring are
+still forwarded, invent actual spread keys/values, translate literal values, or assert actual render
+success. Explain the possible overwrite conditional on the source-supported remaining property,
+while keeping the exact local formulas and existing input/process/output ownership rules.` : '') + (moduleStateReads.length ? `\n\nPython module-state input completeness:
+The current owned source reads existing module assignment data. In INPUT preserve each evidenced
+module value's information role in the local membership/comparison, indexing, lookup or other
+actual read, separately from parameter data and owned local literals/intermediates. A process or
+uncertainty mention does not account for that input. moduleStateReads carries the existing binding's
+confirmed assignment scope and exact current source read sites, not its current value: do not infer contents, immutability, initialization
+execution, a new ownership node or successful external method behavior. Use the current source
+read expression as evidence. Do not treat local shadows, attribute names, comments/strings,
+annotation-only uses, nested child-only reads, imports or confirmed function relationships as new
+module-state inputs. Keep unknown value contents/effects uncertain and existing child ownership
+boundaries intact; no additional model pass or source partition is implied.` : '') + (list(node.localLiteralGuardChecklist).length ? `\n\nOwned literal membership guard completeness:
+localLiteralGuardChecklist connects a directly owned named literal-set declaration to its actual
+if/while membership guard. In PROCESS preserve every raw member literal and the exact local guard;
+saying only 'the configured callable/types set' loses the owned comparison criterion. Literal members
+are owned local setup, not external input. Use member/declaration/guard source sites for concrete
+claims; source order and literal spellings are retained without evaluating or deduplicating values.
+Do not copy another node's set contents, infer that conditional setup always ran, claim actual runtime
+membership outcomes, or add a new ownership/relationship. This is source attention, not validation.
+For this checklist only, keep the response concise within the existing output budget: state each
+owned literal and complete guard once in PROCESS, retaining every branch and return boundary.
+Group related literals in one exact list; do not repeat that list or full predicates in INPUT,
+OUTPUT, childUses or every evidence claim. Evidence should give short distinct source-supported
+claims, not recopy PROCESS. Concision must not remove a literal, guard, branch, source or child contract.` : '') + (list(node.jsxPropChecklist).length ? `\n\nJSX source checklist completion:
+jsxPropChecklist preserves ordered explicit properties and exact spreads, plus the nearest uniquely
+confirmed preceding owned rest destructuring and its excluded source keys. In PROCESS explain the
+material consequence of each later spread on earlier explicit values: remaining same-named keys
+may overwrite them. Keys removed by that destructuring do not remain ordinary rest overrides;
+computed exclusion keys remain expressions, not invented literal names. In OUTPUT describe the
+final constructed props conditionally after all spreads; never present an earlier explicit value
+as guaranteed final when a later spread can replace it. Preserve all raw prop expressions/literals,
+without evaluating actual props. Children have their own supplied sites; returnSite is the return
+statement, not the closing tag. A whole expression's start can support its spanning construction;
+use exact attribute/child/return sites to keep more specific claims precise, rather than declaring
+all multi-line start anchors false. No imported runtime/render success is established.
+Apply each branch's restBinding.excludedKeys BEFORE deciding which explicit props can be overwritten.
+A definitely excluded noncomputed key cannot override an earlier explicit prop through that rest
+spread, including in OUTPUT; only source-supported remaining keys may do so. Do not invent a literal
+for computed exclusions. In the SAME response check final output against this branch's exact order
+and exclusions, without an extra pass. For supplied parameter type declarations, preserve required
+versus optional FIELD BY FIELD: never make all fields optional because some have ? or defaults.
+Keep declared intersection operands; do not infer imported fields or runtime prop values.` : '') + (list(node.writeChecklist).length || list(node.optionalAccessChecklist).length ? `\n\nJavaScript source write and optional-access completion:
+writeChecklist preserves actual owned writes and confirmed lexical module scope where known.
+Represent module-state writes AND boundary-observable property mutation requests in OUTPUT; locally
+constructed, unexposed intermediate mutations remain PROCESS. Do not invent external state merely
+from a property assignment. process already
+owns formulas, so do not duplicate all operands there. A write_target_context receiver supplies
+the object/environment needed to locate the destination; plain write does NOT read that property's
+old value. Distinguish receiver/object lookup from oldTargetValueRead and actual read_write operations.
+A locally computed or child-return receiver is not automatically a separate external input; retain
+only the evidenced pre-existing receiver/environment context. Do not silently drop that context
+from INPUT merely because assignment is
+write-only, or claim a prior property value is read. Do not assume DOM/object access or assignments
+succeeded. optionalAccessChecklist keeps each exact ?. site and its expression context: preserve
+its protected base, nullish short-circuit and surrounding fallback/branch in PROCESS. Do not
+collapse optional access into unconditional field reads or extend protection to an unguarded nested
+property/call. Checklists are source requests/evidence, not runtime results or new external contracts.` : '') + (list(node.htmlDeclarationChecklist).length ? `\n\nHTML declaration checklist completion:
+htmlDeclarationChecklist contains actual element/tag sites, ordered attribute declarations with raw
+values, boolean presence, and exact raw text runs including entities. Preserve concrete declaration
+values in the offered structure/output: metadata/policy/viewport/title, important identifiers and
+label/accessibility links, initial disabled/hidden flags/text, and resource declarations must not
+become generic 'settings/controls/resources exist' summaries. Use the exact supplied values and
+texts without evaluating entities, scripts, policy effectiveness, actual rendering or interaction.
+Keep declaration assembly in PROCESS and the offered contracts in OUTPUT without repeating every
+sentence. Group related declarations concisely but retain their relevant literal values. Source
+span/start sites can support long markup context; more specific attribute/text sites guide exact
+claims. Do not invent new nodes, execution dependencies, current runtime values or successful loads.
+Retain important linkage/accessibility and initial literal values concretely, for example compact
+tag[attr=rawValue] groups with their exact text, instead of generic element/attribute-exists prose.
+Preserve source-declared identifiers, label targets and accessibility values plus initial literal
+messages, including language/empty-state guidance and explicitly empty content where the source
+shows it. Do not invent text for an empty element or replace source text with a generic control role.
+Avoid copying the same attribute/text list into both PROCESS and OUTPUT.` : '') + (['javascript','typescript','jsx','tsx'].includes(node.language) && list(node.facts).filter(f => f.kind === 'return_statement').length > 1 ? `\n\nOwned multiple return boundaries:
+Use the supplied direct return_statement facts and current source to preserve every distinct owned
+return form in OUTPUT, including an early literal/empty result before a later child-derived result.
+Distinguish each boundary briefly; do not copy every already-explained branch predicate into OUTPUT,
+repeat child internals or imply the later result is the only return. No execution success is implied.` : '') + (node.language === 'sql' && list(node.facts).some(f => f.kind === 'sql_statements') ? `\n\nSQL declared-contract precision:
+Use the existing sql_statements AST/numbered source: preserve column required/optional and type,
+exact defaults, every UNIQUE/PRIMARY KEY column group, CHECK predicate/allowed literal set, and
+FOREIGN KEY local-to-reference column pairs in positional order. Declarations, IF NOT EXISTS and
+conditional inserts do not prove existing schema or successful changes. Cite declaration rows;
+do not duplicate the AST or invent nullable flags/current values. Use short per-table concrete
+constraint/column contract lists within the existing output budget, avoiding AST retelling,
+repeated evidence and generic constraints/defaults summaries. Keep every declared constraint.` : '') + '\n최종 언어 확인: 이 응답 안에서 모든 설명 필드의 문장이 한국어인지 확인한 뒤 확정하세요. 원문 코드·문자열·식별자는 그대로 유지하고, 추가 모델 호출이나 출력 후 번역 수리는 하지 마세요.',
     input: JSON.stringify({
       strategy: hypothesis.id,
       currentNodeId: nodeId,

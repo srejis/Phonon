@@ -48,12 +48,12 @@ function patternNames(n){
 function stringValue(n){return n?.type==='string'?n.namedChildren.map(c=>c.text).join(''):n?.text??'';}
 function collectBindings(root,entries,language,fileInfo){
  const moduleScope={name:'<module>',kind:'module',parent:null,bindings:new Map()};
- const scopes=[moduleScope],at=new Map(),pendingAssignments=[],assignmentSources=new WeakMap();
+ const scopes=[moduleScope],at=new Map(),pendingAssignments=[],assignmentSources=new WeakMap(),declarationSources=new WeakMap();
  const byAst=new Map(entries.map(e=>[astKey(e.ast),e]));
  function add(scope,name,kind,n,extra={}){
   if(!name)return;
   const binding={name,kind,scope:scope.name,line:n.startPosition.row+1,target:null,targetId:null,status:'unresolved',...extra};
-  if(!scope.bindings.has(name))scope.bindings.set(name,[]);scope.bindings.get(name).push(binding);return binding;
+  if(!scope.bindings.has(name))scope.bindings.set(name,[]);scope.bindings.get(name).push(binding);declarationSources.set(binding,n);return binding;
  }
  function declarePattern(scope,n,kind,owner,extra={}){for(const name of patternNames(n))add(scope,name,kind,owner,extra);}
  function importItem(scope,n,record){fileInfo.imports.push(record);add(scope,record.local,'import',n,{...record,kind:'import',importKind:record.kind,target:null,targetId:null,status:'unresolved',scope:scope.name});}
@@ -144,8 +144,90 @@ function collectBindings(root,entries,language,fileInfo){
  }
  if(language==='python')for(const [name,items]of moduleScope.bindings){const binding=items[0];fileInfo.exports.push({exported:name,local:name,source:binding.kind==='import'?binding.source:null,imported:binding.kind==='import'?binding.imported:name,kind:'named',line:binding.line,targetId:resolve(moduleScope,name).targetId});}
  const flatten=scope=>{const result=[];for(let current=scope;current;current=current.parent){if(current.kind==='class'&&scope.kind!=='class')continue;for(const items of current.bindings.values())result.push(...items);}return result;};
- return {at,scopes,moduleScope,resolve,flatten,assignmentSources};
+ return {at,scopes,moduleScope,resolve,flatten,assignmentSources,declarationSources};
 }
+
+// Source structure only: no prop evaluation, environment execution, value/type inference or edges.
+function ownedSourceChecklists(ast,node,bindingInfo,language,source,top=false){
+ const result={},jsx=[],writes=[],optional=[],html=[],literalGuards=new Map();
+ const point=n=>{const covered=node.lineMap.map((row,index)=>({row,line:index+1})).filter(item=>item.row>=n.startPosition.row+1&&item.row<=n.endPosition.row+1);return {line:covered[0]?.line??0,endLine:covered.at(-1)?.line??0};};
+ const own=n=>n.startIndex>=ast.startIndex&&n.endIndex<=ast.endIndex&&point(n).line>0&&point(n).endLine>0;
+ const site=n=>({...point(n),source:n.text});
+ const resolve=(at,name)=>bindingInfo.resolve(bindingInfo.at.get(astKey(at))??bindingInfo.moduleScope,name);
+ function restFor(expression,at){
+  if(expression?.type!=='identifier')return null;
+  const resolved=resolve(at,expression.text),declaration=bindingInfo.declarationSources.get(resolved.binding);
+  if(resolved.status==='candidate'||!declaration||declaration.endIndex>at.startIndex||!own(declaration))return null;
+  const pattern=declaration.type==='variable_declarator'?declaration.childForFieldName('name'):null;
+  if(pattern?.type!=='object_pattern')return null;
+  const rest=pattern.namedChildren.find(c=>c.type==='rest_pattern'&&c.namedChildren[0]?.text===expression.text);
+  if(!rest)return null;
+  const excludedKeys=pattern.namedChildren.filter(c=>c!==rest).map(c=>{
+   const key=c.childForFieldName('key')??c.childForFieldName('left')??c;
+   return {source:key.text,computed:key.type==='computed_property_name'};
+  });
+  return {...site(declaration),pattern:pattern.text,valueSource:declaration.childForFieldName('value')?.text??null,scope:resolved.scope?.name??null,excludedKeys};
+ }
+ walk(ast,n=>{
+  if((top&&(definitions.has(n.type)||isClass(n)))||(n!==ast&&(definitions.has(n.type)||isClass(n))))return;
+  if(!own(n))return;
+
+  if(language==='python'&&['if_statement','while_statement'].includes(n.type)){
+   const condition=n.childForFieldName('condition');
+   if(condition)walk(condition,comparison=>{
+    if(comparison.type!=='comparison_operator')return;
+    for(let i=1;i<comparison.children.length;i++){
+     const candidate=comparison.children[i];
+     if(candidate.type!=='identifier'||comparison.children[i-1].text!=='in')continue;
+     const resolved=resolve(comparison,candidate.text),declaration=bindingInfo.assignmentSources.get(resolved.binding),literal=declaration?.childForFieldName('right');
+     if(resolved.status==='candidate'||!declaration||!own(declaration)||declaration.endIndex>condition.startIndex||literal?.type!=='set'||!literal.namedChildren.every(member=>['string','integer','float','true','false','none','concatenated_string'].includes(member.type)))continue;
+     const key=astKey(declaration);if(!literalGuards.has(key))literalGuards.set(key,{name:candidate.text,declaration:site(declaration),literal:site(literal),members:literal.namedChildren.map(site),guards:[]});
+     const record=literalGuards.get(key),guard=site(condition);if(!record.guards.some(item=>item.line===guard.line&&item.source===guard.source))record.guards.push(guard);
+    }
+   });
+  }
+  if(language==='tsx'&&['jsx_opening_element','jsx_self_closing_element'].includes(n.type)){
+   const parts=n.namedChildren.filter(c=>c.type==='jsx_attribute'||c.type==='jsx_expression');
+   if(parts.some(c=>c.namedChildren[0]?.type==='spread_element')){
+    const properties=parts.map((part,index)=>{const spread=part.namedChildren[0];
+     if(spread?.type==='spread_element'){const expression=spread.namedChildren[0];return {index,kind:'spread',...site(part),expression:expression?.text??'',restBinding:restFor(expression,n)};}
+     return {index,kind:'explicit',...site(part),name:part.namedChildren[0]?.text??'',valueSource:part.namedChildren.slice(1).map(c=>c.text).join('')};
+    });
+    let returnAst=n.parent;while(returnAst&&!definitions.has(returnAst.type)&&returnAst.type!=='return_statement')returnAst=returnAst.parent;
+    const element=n.parent,children=element?.type==='jsx_element'?element.namedChildren.filter(c=>!['jsx_opening_element','jsx_closing_element'].includes(c.type)).map(site):[];
+    jsx.push({...point(n),tag:n.childForFieldName('name')?.text??n.namedChildren[0]?.text??'',openingSource:n.text,properties,children,returnSite:returnAst?.type==='return_statement'&&own(returnAst)?point(returnAst):null});
+   }
+  }
+  if(['javascript','typescript','tsx'].includes(language)){
+   if(['assignment_expression','augmented_assignment_expression','update_expression'].includes(n.type)){
+    const left=n.childForFieldName('left')??n.childForFieldName('argument'),right=n.childForFieldName('right');
+    const operator=n.childForFieldName('operator')?.text??n.children.find(c=>['=','+=','-=','*=','/=','%=','++','--','&&=','||=','??=','**=','&=','|=','^=','<<=','>>=','>>>='].includes(c.text))?.text??'';
+    const access=operator==='='?'write':'read_write';
+    if(left?.type==='identifier'){
+     const resolved=resolve(n,left.text);
+     if(resolved.scope?.name==='<module>'&&['const','let','var','assignment'].includes(resolved.binding?.kind))writes.push({...site(n),kind:'module_write',target:left.text,operator,access,bindingScope:resolved.scope.name,rightSource:right?.text??null});
+    }else if(['member_expression','subscript_expression'].includes(left?.type)){
+     const receiver=left.childForFieldName('object');writes.push({...site(n),kind:'property_write',target:left.text,receiverSource:receiver?.text??'',receiverUse:'write_target_context',operator,access,oldTargetValueRead:access==='read_write',rightSource:right?.text??null});
+    }
+   }
+   if(n.type==='optional_chain'){
+    let expression=n.parent;while(expression.parent&&['member_expression','subscript_expression','call_expression','binary_expression','ternary_expression','parenthesized_expression','pair'].includes(expression.parent.type))expression=expression.parent;
+    optional.push({...site(n.parent),operator:n.text,baseSource:n.parent.childForFieldName('object')?.text??n.parent.childForFieldName('function')?.text??'',contextSource:expression.text});
+   }
+  }
+  if(language==='html'&&['start_tag','self_closing_tag'].includes(n.type)){
+   const attributes=n.namedChildren.filter(c=>c.type==='attribute').map(attribute=>({...site(attribute),name:attribute.namedChildren.find(c=>c.type==='attribute_name')?.text??'',valueSource:attribute.namedChildren.filter(c=>c.type!=='attribute_name').map(c=>c.text).join('')||null}));
+   const texts=[],container=n.parent;let run=[];
+   const flush=()=>{if(!run.length)return;const first=run[0],last=run.at(-1);texts.push({line:point(first).line,endLine:point(last).endLine,source:source.slice(first.startIndex,last.endIndex)});run=[];};
+   for(const child of container?.namedChildren??[]){if(['text','entity','raw_text'].includes(child.type)&&own(child))run.push(child);else flush();}flush();
+   html.push({...point(n),tag:n.namedChildren.find(c=>c.type==='tag_name')?.text??'',openingSource:n.text,attributes,texts});
+  }
+ },n=>n!==ast&&(definitions.has(n.type)||isClass(n))||top&&(definitions.has(n.type)||isClass(n)));
+ if(literalGuards.size)result.localLiteralGuardChecklist=[...literalGuards.values()];
+ if(jsx.length)result.jsxPropChecklist=jsx;if(writes.length)result.writeChecklist=writes;if(optional.length)result.optionalAccessChecklist=optional;if(html.length)result.htmlDeclarationChecklist=html;
+ return result;
+}
+
 export async function analyzeFiles(files){
  const nodes=[],filesInfo=[],diagnostics=[];
  for(const file of files){
@@ -418,6 +500,7 @@ export async function analyzeFiles(files){
    }
    node.references=node.references.filter((reference,index,all)=>all.findIndex(item=>item.targetId===reference.targetId&&item.line===reference.line&&item.object===reference.object&&item.field===reference.field&&item.access===reference.access)===index);
    node.facts=node.facts.filter((f,i,a)=>a.findIndex(x=>x.line===f.line&&x.kind===f.kind&&x.text===f.text)===i);
+   Object.assign(node,ownedSourceChecklists(ast,node,bindingInfo,language,source,entry.top));
   }
   // Lexical callback ownership is a definition reference, never evidence of invocation.
   for(const child of entries.filter(e=>['arrow_function','function_expression'].includes(e.ast.type))){

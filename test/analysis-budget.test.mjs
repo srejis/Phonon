@@ -6,35 +6,35 @@ const root=path.resolve(import.meta.dirname,'..'),source=path.join(root,'.local'
 const recorded=job=>JSON.parse(fs.readFileSync(path.join(root,'.local','rounds',job.jobId,'budget.json'),'utf8'));
 async function engineBudget(input){requestAnalysis(project.id,{maxCalls:0,...(input===undefined?{}:typeof input==='object'?input:{maxInputTokens:input})});const job=await waitForJob(project.id);assert.equal(job.status,'failed');assert.match(job.reason,/additional allocated calls/);const budget=recorded(job);assert.equal(budget.calls,0);return budget;}
 
-test('engine input range is 256..18000 with default 3000 and unchanged calls and explicit output 64..8000 ceiling',async()=>{
- assert.equal(MIN_INPUT_TOKENS,256);assert.equal(MAX_INPUT_TOKENS,18000);assert.equal(DEFAULT_INPUT_TOKENS,3000);assert.equal(MIN_OUTPUT_TOKENS,64);assert.equal(MAX_OUTPUT_TOKENS,8000);assert.equal(DEFAULT_OUTPUT_TOKENS,1000);
+test('engine input range is 256..19000 with default 3000 and unchanged calls and explicit output 64..8000 ceiling',async()=>{
+ assert.equal(MIN_INPUT_TOKENS,256);assert.equal(MAX_INPUT_TOKENS,19000);assert.equal(DEFAULT_INPUT_TOKENS,3000);assert.equal(MIN_OUTPUT_TOKENS,64);assert.equal(MAX_OUTPUT_TOKENS,8000);assert.equal(DEFAULT_OUTPUT_TOKENS,1000);
  for(const output of [64,1000,2000,4000,8000])assert.equal((await engineBudget({maxOutputTokens:output})).limits.maxOutputTokens,output);
- for(const input of [256,8000,16000,17597,18000])assert.equal((await engineBudget(input)).limits.maxInputTokens,input);
+ for(const input of [256,8000,16000,17597,18000,18228,19000])assert.equal((await engineBudget(input)).limits.maxInputTokens,input);
  const defaults=await engineBudget();assert.equal(defaults.limits.maxInputTokens,3000);assert.equal(defaults.limits.maxOutputTokens,1000);assert.equal(defaults.limits.maxCalls,0);
- for(const options of [{maxInputTokens:255},{maxInputTokens:18001},{maxInputTokens:8000.5},{maxCalls:-1},{maxCalls:25},{maxOutputTokens:63},{maxOutputTokens:8001},{maxOutputTokens:4000.5}])assert.throws(()=>requestAnalysis(project.id,options),/budget outside/);
+ for(const options of [{maxInputTokens:255},{maxInputTokens:19001},{maxInputTokens:8000.5},{maxCalls:-1},{maxCalls:25},{maxOutputTokens:63},{maxOutputTokens:8001},{maxOutputTokens:4000.5}])assert.throws(()=>requestAnalysis(project.id,options),/budget outside/);
 });
-test('MCP schema and validated tool arguments share 18000 ceiling without widening calls or allocated default output',async()=>{
+test('MCP schema and validated tool arguments share 19000 ceiling without widening calls or allocated default output',async()=>{
  let seen;const engine={requestAnalysis:(_id,options)=>{seen=options;return{jobId:'mock',status:'running'};}};
  const server=createPhononServer(engine),client=new Client({name:'budget-test',version:'1'}),[ct,st]=InMemoryTransport.createLinkedPair();await server.connect(st);await client.connect(ct);
- try{const tool=(await client.listTools()).tools.find(t=>t.name==='request_analysis');assert.equal(tool.inputSchema.properties.maxInputTokens.maximum,18000);assert.equal(tool.inputSchema.properties.maxCalls.maximum,24);assert.equal(tool.inputSchema.properties.maxOutputTokens.maximum,8000);
- const result=await client.callTool({name:'request_analysis',arguments:{projectId:'fixture',maxInputTokens:18000}});assert.ok(!result.isError);assert.equal(seen.maxCalls,0);assert.equal(seen.maxInputTokens,18000);
+ try{const tool=(await client.listTools()).tools.find(t=>t.name==='request_analysis');assert.equal(tool.inputSchema.properties.maxInputTokens.maximum,19000);assert.equal(tool.inputSchema.properties.maxCalls.maximum,24);assert.equal(tool.inputSchema.properties.maxOutputTokens.maximum,8000);
+ const result=await client.callTool({name:'request_analysis',arguments:{projectId:'fixture',maxInputTokens:19000}});assert.ok(!result.isError);assert.equal(seen.maxCalls,0);assert.equal(seen.maxInputTokens,19000);
  for(const maxOutputTokens of [2000,4000,8000]){const output=await client.callTool({name:'request_analysis',arguments:{projectId:'fixture',maxCalls:0,maxOutputTokens}});assert.ok(!output.isError);assert.equal(seen.maxOutputTokens,maxOutputTokens);}
  const badOutput=await client.callTool({name:'request_analysis',arguments:{projectId:'fixture',maxOutputTokens:8001}});assert.equal(badOutput.isError,true);
- const invalid=await client.callTool({name:'request_analysis',arguments:{projectId:'fixture',maxInputTokens:18001}});assert.equal(invalid.isError,true);
+ const invalid=await client.callTool({name:'request_analysis',arguments:{projectId:'fixture',maxInputTokens:19001}});assert.equal(invalid.isError,true);
  }finally{await client.close();await server.close();}
 });
-test('UI rendered input range and HTTP handler accept 18000 and reject 18001',async()=>{
+test('UI rendered input range and HTTP handler accept 19000 and reject 19001',async()=>{
  const server=await startUI({port:0}),base='http://127.0.0.1:'+server.address().port;
- try{const html=await(await fetch(base)).text();assert.match(html,/id="maxInput"[^>]*min="256" max="18000" value="3000"/);
+ try{const html=await(await fetch(base)).text();assert.match(html,/id="maxInput"[^>]*min="256" max="19000" value="3000"/);
  const send=input=>fetch(base+'/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectId:project.id,maxCalls:0,maxInputTokens:input})});
  assert.match(html,/id="maxOutput"[^>]*min="64" max="8000" value="1000"/);
  const outputRequest=output=>fetch(base+'/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectId:project.id,maxCalls:0,maxOutputTokens:output})});
  assert.equal((await outputRequest(8001)).status,400);for(const output of [2000,4000,8000]){assert.equal((await outputRequest(output)).status,202);const job=await waitForJob(project.id);assert.equal(recorded(job).limits.maxOutputTokens,output);assert.equal(recorded(job).calls,0);}
- const invalid=await send(18001);assert.equal(invalid.status,400);const valid=await send(18000);assert.equal(valid.status,202);await valid.json();const job=await waitForJob(project.id);assert.equal(recorded(job).limits.maxInputTokens,18000);assert.equal(recorded(job).calls,0);
+ const invalid=await send(19001);assert.equal(invalid.status,400);const valid=await send(19000);assert.equal(valid.status,202);await valid.json();const job=await waitForJob(project.id);assert.equal(recorded(job).limits.maxInputTokens,19000);assert.equal(recorded(job).calls,0);
  }finally{await new Promise(r=>server.close(r));}
 });
-test('actual CLI forwards 18000 to the shared engine with zero model calls',()=>{
- const result=spawnSync(process.execPath,['cli.mjs','analyze',project.id,'0','--input-tokens=18000'],{cwd:root,encoding:'utf8'});const job=JSON.parse(result.stdout);assert.equal(result.status,1);assert.match(job.reason,/additional allocated calls/);const budget=recorded(job);assert.equal(budget.limits.maxInputTokens,18000);assert.equal(budget.calls,0);
+test('actual CLI forwards 19000 to the shared engine with zero model calls',()=>{
+ const result=spawnSync(process.execPath,['cli.mjs','analyze',project.id,'0','--input-tokens=19000'],{cwd:root,encoding:'utf8'});const job=JSON.parse(result.stdout);assert.equal(result.status,1);assert.match(job.reason,/additional allocated calls/);const budget=recorded(job);assert.equal(budget.limits.maxInputTokens,19000);assert.equal(budget.calls,0);
 });
 
 test('native CLI accepts explicit output4000/8000, preserves default1000 and old2000 and rejects8001 without API',()=>{for(const output of [undefined,2000,4000,8000]){const args=['cli.mjs','analyze',project.id,'0',...(output===undefined?[]:['--output-tokens='+output])],result=spawnSync(process.execPath,args,{cwd:root,encoding:'utf8'}),job=JSON.parse(result.stdout);assert.equal(result.status,1);assert.match(job.reason,/additional allocated calls/);const budget=recorded(job);assert.equal(budget.calls,0);assert.equal(budget.limits.maxOutputTokens,output??1000);}const invalid=spawnSync(process.execPath,['cli.mjs','analyze',project.id,'0','--output-tokens=8001'],{cwd:root,encoding:'utf8'});assert.equal(invalid.status,1);assert.match(invalid.stderr,/budget outside/);});

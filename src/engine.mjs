@@ -185,10 +185,10 @@ async function runAnalysis(id,options,job){
    const children=externalIds.map(childId=>meanings[childId]);
    if(children.some(c=>!c))throw new Error('Confirmed child meaning unavailable');
    const normalized=group.cyclic?{id:group.id,kind:'dependency_group',members:group.members.map(requestNode)}:requestNode(group.members[0]);
-   const request=group.cyclic?buildGroupRequest(normalized,children):hypothesis.buildRequest(normalized,children);
+   const request=group.cyclic?buildGroupRequest(normalized,children,group.members.length>1?{sourceNodes:externalIds.map(childId=>graph.nodes.find(node=>node.id===childId)).filter(Boolean).map(requestNode)}:{}):hypothesis.buildRequest(normalized,children);
    const allocation=generationOutputs.find(row=>row.groupId===group.id);
    const profile=meaningProfile(normalized.kind,allocation.maxOutputTokens);
-   allocation.meaningProfileHash=hash(profile);round.save();
+   allocation.meaningProfileHash=hash(profile);allocation.requestHash=hash(request);round.save();
    const identity={request,meaningProfile:profile};
    const cacheKey=hash(identity),requestHash=hash(request),cachePath=path.join(cacheDir,cacheKey+'.json');
    let meaning;

@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 export const STATIC_ANALYSIS_FILES = Object.freeze([
   'src/engine.mjs', 'src/analysis-budget.mjs', 'src/parser.mjs',
   'src/llm.mjs', 'src/state.mjs', 'src/relations.mjs',
-  'src/dependency-groups.mjs', 'src/group-meaning.mjs', 'src/group-request-encoding.mjs',
+  'src/dependency-groups.mjs', 'src/group-meaning.mjs', 'src/group-request-encoding.mjs', 'src/receiver-role-inventory.mjs',
   'src/meaning-language.mjs', 'src/python-contracts.mjs',
   'src/input-role-hints.mjs', 'src/python-shared-effects.mjs', 'src/python-module-contracts.mjs', 'src/python-path-contracts.mjs', 'src/css-parser.mjs',
   'src/sql-parser.mjs', 'src/type-context.mjs',

@@ -6,7 +6,7 @@ const fixtures = [{"id":"normalized","language":"python","source":"def normalize
 const previousHashes = ["ba0ca427efeaf54c704e14c1f503fd5c050ac6ee945a99445006cd721a8bec92","8db739309e39bf2a557d9df66bfb35b71381412084d544fa345689b2262fffe8"];
 const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 test('apart from explicit v20 language instructions, non-negated base requests retain v16 bytes for two fixtures',()=>{
- assert.equal(hypothesis.version,35);
+ assert.equal(hypothesis.version,36);
  fixtures.forEach((node,index)=>{const request=buildRequest(node,[]);request.instructions=request.instructions.replace(/\n응답 언어 계약:[\s\S]*?설명 자체를 한국어로 쓰세요\./,'').replace(/\n최종 언어 확인:[^\n]*$/,'');assert.equal(fingerprint(request),previousHashes[index]);});
 });
 test('source negation preserves full predicate and separates False, scoped exceptions and child information',()=>{

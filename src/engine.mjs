@@ -1,3 +1,5 @@
+import {validateGroupStrategies,validateStrategyScope,prepareMixedComponents,produceMixedGroup,validateMixedEnvelope,importReviewedComponents,readImportManifest,atomicMixedCache} from './mixed-group-components.mjs';
+const MIXED_IMPORT=Symbol('reviewed mixed import');
 import {MIN_INPUT_TOKENS,MAX_INPUT_TOKENS,DEFAULT_INPUT_TOKENS,MIN_OUTPUT_TOKENS,MAX_OUTPUT_TOKENS,DEFAULT_OUTPUT_TOKENS} from './analysis-budget.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -81,12 +83,18 @@ export function requestAnalysis(id,options={}){
  if(options.nodeIds!==undefined&&(!Array.isArray(options.nodeIds)||options.nodeIds.some(id=>typeof id!=='string'||!id.trim())))throw new Error('nodeIds must be an array of nonempty node identifiers');
  const outputAllocations=validateOutputAllocations(options.outputAllocations,maxOutputTokens);
  const reasoningAllocations=validateReasoningAllocations(options.reasoningAllocations);
+ const groupStrategies=validateGroupStrategies(options.groupStrategies);
  const existing=state.readJob(id);
  if(existing?.status==='queued'||existing?.status==='running')return existing;
  const lock=state.acquireLock(id);
  const job={jobId:lock.token,jobToken:lock.token,ownerPID:process.pid,ownerStartId:lock.ownerStartId,status:'queued',queuedAt:new Date().toISOString(),processed:0};
  try{state.writeJob(id,job);}catch(error){state.releaseLock(id);throw error;}
- setImmediate(()=>runAnalysis(id,{...options,maxCalls,maxInputTokens,maxOutputTokens,outputAllocations,reasoningAllocations},job));return state.readJob(id);
+ setImmediate(()=>runAnalysis(id,{...options,maxCalls,maxInputTokens,maxOutputTokens,outputAllocations,reasoningAllocations,groupStrategies},job));return state.readJob(id);
+}
+export function importReviewedMixedGroup(id,groupId,proofs,options={}){
+ if(options.maxCalls!==undefined&&options.maxCalls!==0)throw new Error('Reviewed import is zero-call only');
+ const manifest=readImportManifest(proofs);if(manifest.projectId!==id||manifest.groupId!==groupId)throw new Error('Mixed import project/group mismatch');
+ return requestAnalysis(id,{...options,maxCalls:0,nodeIds:manifest.strategy.components.map(c=>c.memberId),groupStrategies:{groups:{[groupId]:manifest.strategy}},[MIXED_IMPORT]:{[groupId]:proofs}});
 }
 export async function waitForJob(id){
  let shared=state.readJob(id);
@@ -168,6 +176,7 @@ async function runAnalysis(id,options,job){
   fs.writeFileSync(path.join(dir,'structure.json'),JSON.stringify({graph,dependencyGroups:groupStructure,selectedNodeIds:[...needed],meanings:{},qualityStatus:graph.diagnostics.length?'stage12_partial_with_diagnostics':'stage12_only',structureComplete:graph.diagnostics.length===0,completedAt:new Date().toISOString()},null,2));
   const promptPath=path.join(ROOT,'experiments/h3.mjs'),promptHash=hash(fs.readFileSync(promptPath,'utf8'));
   const hypothesis=await import(pathToFileURL(promptPath).href+'?version='+promptHash);
+  const groupStrategies=validateStrategyScope(ordered,options.groupStrategies);
   const generationOutputs=applyReasoningAllocations(generationOutputPlan(ordered,options.outputAllocations,options.maxOutputTokens),ordered,options.reasoningAllocations);
   const round=beginRound(job.jobId,{maxCalls:options.maxCalls,maxInputTokens:options.maxInputTokens,maxOutputTokens:options.maxOutputTokens,generationOutputs});
   const meanings={},childVersions={},nodeSettings={},nodeSourceHashes={},meaningSources={},cacheDir=path.join(dir,'cache','h3');fs.mkdirSync(cacheDir,{recursive:true});
@@ -186,13 +195,31 @@ async function runAnalysis(id,options,job){
    const children=externalIds.map(childId=>meanings[childId]);
    if(children.some(c=>!c))throw new Error('Confirmed child meaning unavailable');
    const normalized=group.cyclic?{id:group.id,kind:'dependency_group',members:group.members.map(requestNode)}:requestNode(group.members[0]);
+   const allocation=generationOutputs.find(row=>row.groupId===group.id),strategy=groupStrategies?.groups[group.id];let meaning;
+   if(strategy){
+    const sourceNodes=externalIds.map(childId=>graph.nodes.find(node=>node.id===childId)).filter(Boolean).map(requestNode),plan=prepareMixedComponents(normalized,children,sourceNodes,strategy,allocation.maxOutputTokens);
+    for(const component of plan.components)if(Math.max(component.sdkTokens,component.zodTokens)>options.maxInputTokens)throw new Error('Mixed component input exceeds assigned limit');
+    allocation.generationStrategy=strategy.mode;allocation.components=plan.components.map(c=>({memberId:c.memberId,generationMode:c.generationMode,reasoningEffort:c.profile.reasoningEffort,maxOutputTokens:c.profile.maxTokens,requestHash:c.requestHash,meaningProfileHash:c.profileHash,estimatedInputTokens:c.sdkTokens,estimatedZodInputTokens:c.zodTokens}));
+    allocation.groupReasoningAllocation=allocation.reasoningEffort??'none';delete allocation.reasoningEffort;allocation.requestHash=plan.requestHash;allocation.meaningProfileHash=plan.profileHash;round.save();
+    const file=path.join(cacheDir,'mixed',plan.key+'.json');let envelope,created=false;
+    const proofs=options[MIXED_IMPORT]?.[group.id];
+    if(proofs)envelope=importReviewedComponents(plan,proofs,id);
+    else if(fs.existsSync(file)){try{envelope=readOptional(file);validateMixedEnvelope(plan,envelope);}catch(error){cacheRejected.push({cacheKey:plan.key,groupId:group.id,reason:error.name});envelope=null;}}
+    if(!envelope){
+     envelope=await produceMixedGroup(plan,round,async component=>{
+      state.assertLockOwner(id,job.jobToken);const slots=component.generationMode==='member_effect_slots_v1',response=await explain(component.request,normalized,children,round,{maxOutputTokens:component.profile.maxTokens,reasoningEffort:component.profile.reasoningEffort,...(slots?{focusMemberId:component.memberId,effectSlots:true}:{})});
+      return {response,provenance:{roundId:job.jobId,sourceHashes:plan.sourceHashes,childHashes:plan.childHashes}};
+     });created=true;
+    }
+    meaning=validateMixedEnvelope(plan,envelope);assertRuntimeConditions();if(settings()!==analysisSettings)throw new Error('Analysis conditions changed during execution; previous successful snapshot preserved');state.assertLockOwner(id,job.jobToken);
+    if(proofs||created)atomicMixedCache(file,envelope);
+    allocation.artifactHash=envelope.artifactHash;allocation.status=created?'generated':proofs?'imported':'reused';allocation.componentProvenance=envelope.provenance;round.save();(created?generated:reused).push(...memberIds);
+   }else{
    const request=group.cyclic?buildGroupRequest(normalized,children,group.members.length>1?{sourceNodes:externalIds.map(childId=>graph.nodes.find(node=>node.id===childId)).filter(Boolean).map(requestNode)}:{}):hypothesis.buildRequest(normalized,children);
-   const allocation=generationOutputs.find(row=>row.groupId===group.id);
    const profile=meaningProfile(normalized.kind,allocation.maxOutputTokens,allocation.reasoningEffort);
    allocation.meaningProfileHash=hash(profile);allocation.requestHash=hash(request);round.save();
    const identity={request,meaningProfile:profile};
    const cacheKey=hash(identity),requestHash=hash(request),cachePath=path.join(cacheDir,cacheKey+'.json');
-   let meaning;
    function loadCompatible(file,expectedKey,requireProof=false){
     try{
      const cached=readOptional(file);if(!cached)return null;
@@ -231,6 +258,7 @@ async function runAnalysis(id,options,job){
     state.assertLockOwner(id,job.jobToken);
     meaning=validateCachedMeaning(await explain(request,normalized,children,round,{maxOutputTokens:allocation.maxOutputTokens,reasoningEffort:allocation.reasoningEffort}),normalized,children);
     fs.writeFileSync(cachePath,JSON.stringify({cacheKey,requestHash,meaningProfile:profile,meaning,audit:{promptHash,parserVersion:VERSION,analysisConditions:analysisSettings,runtimeFingerprint}},null,2));generated.push(...memberIds);allocation.status='generated';round.save();
+   }
    }
    if(group.cyclic)for(const member of meaning.members){const source=group.members.find(n=>n.id===member.id);meanings[member.id]={...member,name:source.name};}
    else meanings[group.members[0].id]=meaning;

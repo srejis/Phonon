@@ -62,10 +62,9 @@ function pythonOwnedBody(source){
 export function pythonInputRoleHints(node,children=[],group=false){
  if(node.language!=='python')return {};
  const result={},contracts=list(node.externalContracts),calls=list(node.calls);
- if(list(node.facts).some(f=>f.kind==='for_statement')){
-  const queryUses=calls.flatMap(call=>{const contractIndex=contracts.findIndex(c=>c.name===call.name&&c.canonicalName==='pathlib.Path.is_file');return contractIndex>=0&&call.resultUse==='local_use'?[{name:call.name,line:call.line,contractIndex}]:[];});
-  if(queryUses.length)result.resourceQueryUses=queryUses;
- }
+ const hasIteration=list(node.facts).some(f=>f.kind==='for_statement');
+ const queryUses=calls.flatMap(call=>{const contractIndex=contracts.findIndex(c=>c.name===call.name&&(c.canonicalName==='pathlib.Path.read_bytes'&&['local_use','direct_return'].includes(call.resultUse)||c.canonicalName==='pathlib.Path.is_file'&&hasIteration&&call.resultUse==='local_use'));return contractIndex>=0?[{name:call.name,line:call.line,contractIndex}]:[];});
+ if(queryUses.length)result.resourceQueryUses=queryUses;
  const childById=new Map(list(children).map(c=>[c.id,c]));
  const receiverChildInputs=calls.flatMap(call=>{
   const receiver=call.name?.match(/^([A-Za-z_]\w*)\./)?.[1],child=childById.get(call.targetId);

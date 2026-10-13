@@ -552,7 +552,7 @@ export async function analyzeFiles(files){
    }
    if(language==='python')for(const call of node.calls){
     const callAst=callAsts.get(call),fn=callAst?.childForFieldName('function'),method=fn?.childForFieldName('attribute')?.text;
-    if(call.targetId||!['mkdir','with_suffix','unlink','open','is_file','resolve'].includes(method)||fn?.type!=='attribute')continue;
+    if(call.targetId||!['mkdir','with_suffix','unlink','open','is_file','resolve','read_bytes'].includes(method)||fn?.type!=='attribute')continue;
     const proof=declaredPathReceiverProof(ast,fn.childForFieldName('object'),callAst,{resolveAt:(at,name)=>bindingInfo.resolve(bindingInfo.at.get(astKey(at))??lexical,name)});
     if(proof){call.declaredPathProvenance=proof;call.declaredPathMethod=method;}
    }

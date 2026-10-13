@@ -5,6 +5,7 @@ const identifier=/^[A-Za-z_]\w*$/;
 const assumption='조건부 선언 계약: pathlib와 Path 속성의 런타임 교체가 없고 실제 인자가 명시된 표준 Path 계약을 충족한다고 가정. 타입 주석은 런타임 강제나 실제 값/파일 존재/내용/작업 성공을 증명하지 않음.';
 const docs='https://docs.python.org/3.14/library/pathlib.html#';
 const contracts={
+ read_bytes:{input:'receiver 경로와 해당 파일의 기존 바이너리 내용',process:'경로가 가리키는 파일의 바이너리 내용 읽기 요청',returns:['파일의 바이너리 내용을 담은 bytes'],effects:['파일 내용 읽기 요청'],output:'성공하는 경우 파일 내용의 bytes; 실제 내용/읽기 성공은 미확인',source:docs+'pathlib.Path.read_bytes'},
  mkdir:{input:'receiver 경로와 실제 mode/parents/exist_ok 인자',process:'디렉터리 생성 요청; parents=True면 누락된 상위 디렉터리도 생성하며 exist_ok는 기존 디렉터리의 허용 조건',returns:[],effects:['receiver 위치의 디렉터리 생성 요청'],output:'성공하는 경우 디렉터리 생성 효과; 실제 성공/존재는 미확인',source:docs+'pathlib.Path.mkdir'},
  with_suffix:{input:'receiver 경로와 지정한 새 suffix',process:'suffix를 바꾼 새 경로를 계산; 빈 suffix는 기존 suffix 제거',returns:['suffix를 바꾼 새 Path'],effects:[],output:'새 Path 값; 파일 생성이나 이름 변경 실행을 뜻하지 않음',source:docs+'pathlib.PurePath.with_suffix'},
  unlink:{input:'receiver 파일/심볼릭링크 경로와 실제 missing_ok',process:'파일 또는 심볼릭링크 삭제 요청; 기본 missing_ok=False는 누락 시 FileNotFoundError',returns:[],effects:['receiver 파일/심볼릭링크 삭제 요청'],output:'성공하는 경우 삭제 효과; 실제 파일 존재/삭제 성공은 미확인',source:docs+'pathlib.Path.unlink'},

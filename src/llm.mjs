@@ -56,7 +56,6 @@ export function applyReasoningAllocations(plan,groups,allocations){
  const selected=new Map(groups.map(group=>[group.id,group]));
  for(const[id,effort]of Object.entries(allocations?.groups??{})){
   const group=selected.get(id);if(!group)throw new Error('Reasoning allocation ID outside selected dependency scope');
-  if(effort==='low'&&!group.cyclic)throw new Error('Low reasoning allocation requires a dependency group');
  }
  return plan.map(row=>Object.hasOwn(allocations?.groups??{},row.groupId)?{...row,reasoningEffort:allocations.groups[row.groupId]}:row);
 }
@@ -71,7 +70,7 @@ export function generationOutputLimit(round,allocated){
 }
 export function meaningModelSettings(profile){return {maxTokens:profile.maxTokens,reasoning:{effort:profile.reasoningEffort},store:false,retry:{maxRetries:0}};}
 export function meaningProfile(kind,maxOutputTokens,effort='none',focus){
- const reasoningEffort=generationReasoningEffort(effort);if(reasoningEffort==='low'&&kind!=='dependency_group')throw new Error('Low reasoning allocation requires a dependency group');
+ const reasoningEffort=generationReasoningEffort(effort);
  if(focus!==undefined&&(kind!=='dependency_group'||!focus||typeof focus!=='object'||Array.isArray(focus)||Object.keys(focus).some(key=>!['focusMemberId','contextGroupId','inputContextHash'].includes(key))||typeof focus.focusMemberId!=='string'||!focus.focusMemberId.trim()||typeof focus.contextGroupId!=='string'||!focus.contextGroupId.trim()||! /^[a-f0-9]{64}$/.test(focus.inputContextHash??'')))throw new Error('Invalid focused generation profile');
  const dependencies=JSON.parse(fs.readFileSync(path.join(ROOT,'package.json'),'utf8')).dependencies;
  return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort,maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',ownershipTraceOrigin:'host_projection',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema),...(focus===undefined?{}:{outputBoundary:'member_focused_v1',...focus})};

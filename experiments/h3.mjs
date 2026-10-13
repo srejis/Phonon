@@ -2,7 +2,7 @@ import {pythonModuleStateReads,pythonInputRoleHints,pythonInputRoleInstructions}
 /** H3: one-pass claim ownership ledger. No I/O or model calls. */
 export const hypothesis = Object.freeze({
   id: 'h3',
-  version: 37,
+  version: 38,
   name: 'Ownership ledger with single-pass owner checks',
   strategy: 'Separate local evidence from child-owned claims; check ownership internally in the same response; host projects the trace.'
 });

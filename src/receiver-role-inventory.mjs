@@ -33,3 +33,30 @@ export function buildReceiverRoleInventory(group,externalChildren=[],sourceNodes
  return {actionColumns:['ownerKind','ownerIndex','receiver','field','role','ownerLine','referenceIndex','factIndex','ownerCallIndex'],actions,useColumns:['callerMemberIndex','callIndex','actionIndex'],uses,parameterColumns:['memberIndex','parameterBindingIndices'],parameters};
 }
 export const receiverRoleInventoryInstructions='Receiver role inventory is source evidence, not runtime proof. Member/child indices address existing ledgers. read_write requires existing state INPUT and conditional state-update OUTPUT; append_request is an actual method request, not guaranteed list mutation. Each use links only a matched receiver/class confirmed call. Preserve action reachability independently of later construction. Parameter rows point to declared bindings: retain source-backed INPUT roles, not invented uses. Internal delegation retains target action roles without formulas/guards. Cite caller sites for uses, owner coordinates only for own actions; origin references never invoke constructors. Keep all supplied child IPO and original roles. External owner ref/fact indices are stored graph provenance, not transmitted child source; never claim reading an unsupplied external body.';
+
+/** Required role attention projected only from existing source actions and matched uses. */
+export function buildRequiredReceiverOutputRoles(group,inventory,externalChildren=[]){
+ const members=list(group?.members);if(members.length<2||!inventory)return [];
+ const actions=list(inventory.actions),children=list(externalChildren);
+ return members.map((member,memberIndex)=>{
+  const rows=[],identities=new Map();
+  if(!receiverOK(member))return {count:0,roleIds:[],roles:[]};
+  const validAction=index=>Number.isInteger(index)&&index>=0&&index<actions.length&&Array.isArray(actions[index])&&typeof actions[index][3]==='string'&&['read_write','append_request'].includes(actions[index][4]);
+  const add=(actionIndex,callIndex)=>{
+   if(!validAction(actionIndex))return;const action=actions[actionIndex],identity=JSON.stringify([member.classContext.initializationNodeId,member.classContext.receiver,action[3],action[4]]);
+   let row=identities.get(identity);if(!row){row={roleId:'receiver-output:'+rows.length,receiver:member.classContext.receiver,field:action[3],actionKind:action[4],directActionIndices:[],viaCalls:[]};identities.set(identity,row);rows.push(row);}
+   if(callIndex===null){if(!row.directActionIndices.includes(actionIndex))row.directActionIndices.push(actionIndex);}
+   else if(!row.viaCalls.some(c=>c.callIndex===callIndex&&c.sourceActionIndex===actionIndex))row.viaCalls.push({callIndex,sourceActionIndex:actionIndex});
+  };
+  actions.forEach((action,index)=>{if(Array.isArray(action)&&action[0]==='member'&&action[1]===memberIndex&&action[2]===member.classContext.receiver)add(index,null);});
+  for(const use of list(inventory.uses)){
+   if(!Array.isArray(use)||use[0]!==memberIndex)continue;const [_,callIndex,actionIndex]=use;
+   if(!Number.isInteger(callIndex)||callIndex<0||!validAction(actionIndex))continue;
+   const call=list(member.calls)[callIndex],action=actions[actionIndex],target=action[0]==='member'?members[action[1]]:action[0]==='child'?children[action[1]]:null;
+   if(!target||call?.status!=='confirmed_same_file'||call.targetId!==target.id)continue;
+   add(actionIndex,callIndex);
+  }
+  return {count:rows.length,roleIds:rows.map(row=>row.roleId),roles:rows};
+ });
+}
+export const requiredReceiverOutputRoleInstructions="requiredReceiverOutputRoles is this member's exact DISTINCT source-backed OUTPUT role inventory. Represent EVERY receiver.field/actionKind listed in OUTPUT, even when obtained through a call. count counts roles, not sentences; one item may name several roles. directActionIndices and viaCalls point only to existing inventory actions/call indices. A local_use return does not absorb a separate state update; no own write or ignored return does not erase a supplied delegated effect. Retain each action's reachability independently of later construction success, without target guards/formulas/arguments. append_request is a requested method action, not type/listcontents/mutation success proof. Use own call evidence for delegated roles, owner action coordinates only for directly owned roles. Do not add effects, edges, constructor invocations or traces.";

@@ -1,4 +1,4 @@
-import {buildReceiverRoleInventory,receiverRoleInventoryInstructions} from './receiver-role-inventory.mjs';
+import {buildReceiverRoleInventory,receiverRoleInventoryInstructions,buildRequiredReceiverOutputRoles,requiredReceiverOutputRoleInstructions} from './receiver-role-inventory.mjs';
 import {pythonInputRoleHints,pythonInputRoleInstructions,groupInputRoleInstructions} from './input-role-hints.mjs';
 import {encodeGroupRequestData, groupEncodingInstructions} from './group-request-encoding.mjs';
 /** One response for a confirmed dependency SCC; no I/O or model calls. */
@@ -171,7 +171,7 @@ Do not accept ownerChecks as a correctness guarantee. All explanation text in in
       internalReferences: (member.references ?? []).filter(reference => members.has(reference?.targetId))});}),
     externalOwnershipLedger: externalLedger
   }))))};
-  if(receiverRoles){const data=JSON.parse(request.input);data.receiverRoleInventory=receiverRoles;request.input=JSON.stringify(data);request.instructions+='\n\n'+receiverRoleInventoryInstructions;}
+  if(receiverRoles){const data=JSON.parse(request.input);data.receiverRoleInventory=receiverRoles;const requiredRoles=buildRequiredReceiverOutputRoles(group,receiverRoles,externalLedger);for(const [index,member]of data.memberLedgers.entries())if(requiredRoles[index]?.count)member.requiredReceiverOutputRoles=requiredRoles[index];request.input=JSON.stringify(data);request.instructions+='\n\n'+receiverRoleInventoryInstructions;if(requiredRoles.some(row=>row.count))request.instructions+='\n\n'+requiredReceiverOutputRoleInstructions;}
   return request;
 }
 

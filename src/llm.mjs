@@ -1,3 +1,4 @@
+import {effectSlotContract,projectEffectSlotOutput} from './focused-effect-slots.mjs';
 import {MIN_OUTPUT_TOKENS,MAX_OUTPUT_TOKENS} from './analysis-budget.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -75,6 +76,11 @@ export function meaningProfile(kind,maxOutputTokens,effort='none',focus){
  const dependencies=JSON.parse(fs.readFileSync(path.join(ROOT,'package.json'),'utf8')).dependencies;
  return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort,maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',ownershipTraceOrigin:'host_projection',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema),...(focus===undefined?{}:{outputBoundary:'member_focused_v1',...focus})};
 }
+export function effectSlotMeaningProfile(request,node,maxOutputTokens,effort='none',focusMemberId){
+ if(node.kind!=='dependency_group'||!node.members?.some(member=>member.id===focusMemberId))throw new Error('Effect slot focus outside full group');
+ const contract=effectSlotContract(request,meaningOutputSchema,focusMemberId),base=meaningProfile(node.kind,maxOutputTokens,effort,{focusMemberId,contextGroupId:node.id,inputContextHash:hash(request.input)});
+ return {...base,jsonSchema:contract.sdkSchema,outputBoundary:'member_effect_slots_v1',roleSetHash:hash(contract.roles),requiredRoleIds:contract.roleIds,wireSchemaHash:hash(contract.sdkSchema)};
+}
 const stopPath=path.join(ROOT,'.local','api-stop.json');
 export function clearAPIStop(){if(fs.existsSync(stopPath))fs.unlinkSync(stopPath);}
 export class APIFailure extends Error{constructor(record){super('Luna is unavailable; further calls stopped.');this.record=record;}}
@@ -110,14 +116,18 @@ export async function explain(request,node,children,round,allocation={}){
   const data=JSON.parse(request.input);if(data.groupId!==node.id||data.focusMemberId!==focusMemberId||data.outputMemberCount!==1||JSON.stringify(data.outputMemberIds)!==JSON.stringify([focusMemberId])||JSON.stringify(data.memberLedgers?.map(member=>member.id))!==JSON.stringify(node.members.map(member=>member.id)))throw new Error('Focused request boundary mismatch');
   focus={focusMemberId,contextGroupId:node.id,inputContextHash:hash(request.input)};
  }
- const profile=meaningProfile(node.kind,maxOutputTokens,allocation.reasoningEffort,focus);
- const outputSchema=node.kind==='dependency_group'?groupOutputSchema:meaningOutputSchema;
- const estimate=encoding.encode(request.instructions+'\n'+request.input+'\n'+JSON.stringify(z.toJSONSchema(outputSchema))).length+256;
- if(estimate>round.plan.limits.maxInputTokens)throw new Error('Input exceeds assigned estimated token limit');
+ if(allocation.effectSlots!==undefined&&typeof allocation.effectSlots!=='boolean')throw new Error('Invalid effectSlots option');
+ const slots=allocation.effectSlots===true?effectSlotContract(request,meaningOutputSchema,focusMemberId):null;
+ if(slots&&!focus)throw new Error('Effect slots require a focused member');
+ const profile=slots?effectSlotMeaningProfile(request,node,maxOutputTokens,allocation.reasoningEffort,focusMemberId):meaningProfile(node.kind,maxOutputTokens,allocation.reasoningEffort,focus);
+ const outputSchema=slots?slots.wireSchema:node.kind==='dependency_group'?groupOutputSchema:meaningOutputSchema;
+ const estimate=encoding.encode(request.instructions+'\n'+request.input+'\n'+JSON.stringify(slots?slots.sdkSchema:z.toJSONSchema(outputSchema))).length+256;
+ const zodEstimate=slots?encoding.encode(request.instructions+'\n'+request.input+'\n'+JSON.stringify(slots.zodSchema)).length+256:estimate;
+ if(Math.max(estimate,zodEstimate)>round.plan.limits.maxInputTokens)throw new Error('Input exceeds assigned estimated token limit');
  if(round.plan.calls>=round.plan.limits.maxCalls)throw new Error('Assigned call limit reached');
  let key;try{key=designatedKey();}catch{const failure={status:'auth_blocked',reason:'Designated key unavailable or invalid',at:new Date().toISOString()};round.plan.stopped=true;round.save();fs.writeFileSync(stopPath,JSON.stringify(failure));throw new APIFailure(failure);}setTracingDisabled(true);
  let attempts=0;
- const record={nodeId:node.id,model:MODEL,maxOutputTokens,reasoningEffort:profile.reasoningEffort,...(focus===undefined?{}:{outputBoundary:profile.outputBoundary,...focus}),meaningProfileHash:hash(profile),ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
+ const record={...(slots?{roleSetHash:profile.roleSetHash,wireSchemaHash:profile.wireSchemaHash,requiredRoleIds:profile.requiredRoleIds,estimatedZodInputTokens:zodEstimate}:{}),nodeId:node.id,model:MODEL,maxOutputTokens,reasoningEffort:profile.reasoningEffort,...(focus===undefined?{}:{outputBoundary:profile.outputBoundary,...focus}),meaningProfileHash:hash(profile),ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
  const log=()=>fs.appendFileSync(path.join(round.dir,'calls.jsonl'),JSON.stringify(record)+'\n');
  const client=new OpenAI({apiKey:key,baseURL:'https://api.openai.com/v1',organization:null,project:null,maxRetries:0,timeout:45000,
  fetch:async(url,init)=>{
@@ -154,7 +164,9 @@ export async function explain(request,node,children,round,allocation={}){
  const text=(typeof result.finalOutput==='string'?result.finalOutput:JSON.stringify(result.finalOutput??null)).replace(/^```(?:json)?\s*|\s*```$/g,'');
  try{
   const payload=JSON.parse(text);
-  const canonical=deriveMeaningOwnership(payload,node.kind);
+  const projection=slots?projectEffectSlotOutput(payload,slots,node.id,focusMemberId):null;
+  if(projection){record.effectSlotRawDescriptions=projection.rawSlots;record.effectSlotProjection=projection.audit;}
+  const canonical=deriveMeaningOwnership(projection?projection.canonicalWire:payload,node.kind);
   const meaning=node.kind==='dependency_group'?{id:canonical.id,members:focus===undefined?validateGroupMeaning(canonical,node,children):validateFocusedGroupMeaning(canonical,node,children,focusMemberId)}:schema.parse(canonical);
   if(meaning.id!==node.id)throw new Error('Node ID mismatch');
   if(node.kind!=='dependency_group'){

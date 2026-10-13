@@ -76,3 +76,53 @@ export function pythonSharedEffectContracts(entries,bindingInfo,callAsts){
  }
  return result;
 }
+
+/** Current-owned result provenance only; a computed return is not pre-existing INPUT. */
+export function pythonOwnedCallResults(entries,bindingInfo,callAsts){
+ const byId=new Map(entries.map(entry=>[entry.node.id,entry])),result=new Map();
+ for(const entry of entries){
+  if(entry.ast.type!=='function_definition')continue;
+  const rows=[];
+  for(const call of entry.node.calls){
+   const child=byId.get(call.targetId),callAst=callAsts.get(call),assignment=callAst?.parent;
+   if(!child||child===entry||child.ast.type!=='function_definition'||call.status!=='confirmed_same_file'||call.resultUse!=='local_use'||assignment?.type!=='assignment'||!same(field(assignment,'right'),callAst))continue;
+   const left=field(assignment,'left');if(left?.type!=='identifier')continue;
+   let owner=assignment.parent;while(owner&&owner.type!=='function_definition')owner=owner.parent;if(!same(owner,entry.ast))continue;
+   const scope=bindingInfo.at.get(key(left))??bindingInfo.at.get(key(assignment));
+   const resolved=bindingInfo.resolve(scope??bindingInfo.moduleScope,left.text),binding=resolved.binding;
+   if(resolved.status==='candidate'||binding?.kind!=='assignment'||binding.scope!==entry.node.name||resolved.scope?.kind!=='function'||!same(bindingInfo.declarationSources.get(binding),assignment)||!same(bindingInfo.assignmentSources.get(binding),assignment))continue;
+   let directed=false;
+   walk(entry.ast,n=>{if(!['nonlocal_statement','global_statement'].includes(n.type))return;let own=n.parent;while(own&&own.type!=='function_definition')own=own.parent;if(same(own,entry.ast)&&n.namedChildren.some(name=>name.text===left.text))directed=true;});
+   if(directed)continue;
+   const site=line(entry.node,callAst);if(site<1||site!==call.line)continue;
+   rows.push({binding:{name:binding.name,scope:binding.scope,ownerId:entry.node.id},callSite:{line:site,name:call.name,childId:child.node.id,resultUse:call.resultUse},origin:'current_owned_direct_call_result_assignment',roleBoundary:{localIntermediate:true,belongsIn:['process','childUses'],isPreexistingExternalInput:false}});
+  }
+  if(rows.length)result.set(entry.node.id,rows);
+ }
+ return result;
+}
+
+/** Existing ordinary Python nested units: body ownership, never invocation. */
+export function pythonNestedBodyOwners(entries,source){
+ const result=new Map(),offsets=[0];for(let i=0;i<source.length;i++)if(source[i]==='\n')offsets.push(i+1);
+ const unique=entry=>entries.filter(other=>other.node.id===entry.node.id).length===1;
+ for(const parent of entries){
+  if(parent.ast.type!=='function_definition'||!unique(parent))continue;
+  const lines=parent.node.source.split('\n'),rows=[];
+  const point=(position,index)=>({line:parent.node.lineMap.indexOf(position.row+1)+1,column:index-offsets[position.row]});
+  for(const child of entries){
+   if(child===parent||child.ast.type!=='function_definition'||child.ast.parent?.type==='decorated_definition'||child.node.scope!==parent.node.name||!unique(child))continue;
+   let owner=child.ast.parent;while(owner&&!['function_definition','class_definition'].includes(owner.type))owner=owner.parent;
+   if(!same(owner,parent.ast))continue;
+   const body=field(child.ast,'body');if(!body)continue;
+   const definitionSite=point(child.ast.startPosition,child.ast.startIndex),start=point(body.startPosition,body.startIndex),end=point(body.endPosition,body.endIndex);
+   if([definitionSite,start,end].some(p=>!Number.isInteger(p.line)||p.line<1||p.line>lines.length||!Number.isInteger(p.column)||p.column<0||p.column>lines[p.line-1].length)||end.line<start.line||end.line===start.line&&end.column<start.column)continue;
+   const actual=lines.slice(start.line-1,end.line).map((text,index)=>{let a=index===0?start.column:0,b=index===end.line-start.line?end.column:text.length;return text.slice(a,b);}).join('\n');
+   const expected=body.text.split(/\r?\n/).filter(text=>text.trim()).map(text=>text.trimEnd()).join('\n');
+   if(actual!==expected||source.slice(body.startIndex,body.endIndex)!==body.text)continue;
+   rows.push({childId:child.node.id,relationship:'lexical_definition',invocation:false,definitionSite,bodySpan:{start,end}});
+  }
+  if(rows.length)result.set(parent.node.id,rows);
+ }
+ return result;
+}

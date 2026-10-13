@@ -2,7 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';import {bui
 const contracts=[{name:'parent.mkdir',effects:['디렉터리 생성 요청'],source:'official-contract-a',assumption:'조건부'}, {name:'temporary.unlink',effects:['파일 삭제 요청'],source:'official-contract-b',assumption:'조건부'}, {name:'copy',effects:['파일 복사 요청'],source:'official-contract-c',assumption:'조건부'}, {name:'replace',effects:['경로 교체 요청'],source:'official-contract-d',assumption:'조건부'}];
 const node={id:'fixture',language:'python',source:'def f():\n    parent.mkdir()\n    temporary.unlink()\n    try:\n        copy()\n        replace()\n    finally:\n        temporary.unlink()',calls:[{name:'parent.mkdir',line:2},{name:'temporary.unlink',line:3},{name:'copy',line:5},{name:'replace',line:6},{name:'temporary.unlink',line:8}],externalContracts:contracts};
 test('finally checklist preserves five distinct source effect sites and existing contract assumptions',()=>{
- assert.equal(hypothesis.version,30);const before=structuredClone(node),request=buildRequest(node,[]),ledger=JSON.parse(request.input).localLedger;
+ assert.equal(hypothesis.version,34);const before=structuredClone(node),request=buildRequest(node,[]),ledger=JSON.parse(request.input).localLedger;
  assert.deepEqual(node,before);assert.deepEqual(ledger.externalContracts,contracts);
  assert.deepEqual(ledger.effectChecklist.map(c=>[c.line,c.name,c.contractIndex]),[[2,'parent.mkdir',0],[3,'temporary.unlink',1],[5,'copy',2],[6,'replace',3],[8,'temporary.unlink',1]]);
  for(const entry of ledger.effectChecklist)assert.deepEqual(entry.effects,contracts[entry.contractIndex].effects);

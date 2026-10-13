@@ -1,4 +1,4 @@
-import {pythonSharedEffectContracts} from './python-shared-effects.mjs';
+import {pythonSharedEffectContracts,pythonOwnedCallResults,pythonNestedBodyOwners} from './python-shared-effects.mjs';
 import {callResultUse,declaredPathReceiverProof} from './python-path-contracts.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -571,6 +571,12 @@ export async function analyzeFiles(files){
   }
   if(language==='python')for(const [id,contracts]of pythonSharedEffectContracts(entries,bindingInfo,callAsts)){
    entries.find(entry=>entry.node.id===id).node.groupSourceEffectContracts=contracts;
+  }
+  if(language==='python')for(const [id,rows]of pythonOwnedCallResults(entries,bindingInfo,callAsts)){
+   entries.find(entry=>entry.node.id===id).node.groupOwnedCallResults=rows;
+  }
+  if(language==='python')for(const [id,rows]of pythonNestedBodyOwners(entries,source)){
+   entries.find(entry=>entry.node.id===id).node.nestedBodyOwners=rows;
   }
   tree.delete();parser.delete();
  }

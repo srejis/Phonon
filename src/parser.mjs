@@ -1,3 +1,4 @@
+import {pythonSharedEffectContracts} from './python-shared-effects.mjs';
 import {callResultUse,declaredPathReceiverProof} from './python-path-contracts.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -567,6 +568,9 @@ export async function analyzeFiles(files){
    if(!owner)continue;
    const line=owner.node.lineMap.indexOf(child.ast.startPosition.row+1)+1;
    if(line>0)owner.node.references.push({targetId:child.node.id,kind:'callback_definition',line,relationship:'lexical_definition',invocation:false});
+  }
+  if(language==='python')for(const [id,contracts]of pythonSharedEffectContracts(entries,bindingInfo,callAsts)){
+   entries.find(entry=>entry.node.id===id).node.groupSourceEffectContracts=contracts;
   }
   tree.delete();parser.delete();
  }

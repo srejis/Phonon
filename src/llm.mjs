@@ -43,15 +43,36 @@ export function generationOutputPlan(groups,allocations,ceiling){
   return {groupId:group.id,memberIds:group.members.map(node=>node.id),maxOutputTokens:override??allocations?.default??ceiling,status:'pending'};
  });
 }
+export function validateReasoningAllocations(allocations){
+ if(allocations===undefined)return undefined;
+ if(!allocations||typeof allocations!=='object'||Array.isArray(allocations)||Object.keys(allocations).some(key=>key!=='groups'))throw new Error('Invalid reasoning allocations');
+ if(allocations.groups===undefined)return {};
+ const rows=allocations.groups;if(!rows||typeof rows!=='object'||Array.isArray(rows))throw new Error('Invalid reasoning allocation map');
+ return {groups:Object.fromEntries(Object.entries(rows).map(([id,effort])=>{if(!id.trim()||!['none','low'].includes(effort))throw new Error('Invalid reasoning allocation');return[id,effort];}))};
+}
+export function applyReasoningAllocations(plan,groups,allocations){
+ allocations=validateReasoningAllocations(allocations);
+ const selected=new Map(groups.map(group=>[group.id,group]));
+ for(const[id,effort]of Object.entries(allocations?.groups??{})){
+  const group=selected.get(id);if(!group)throw new Error('Reasoning allocation ID outside selected dependency scope');
+  if(effort==='low'&&!group.cyclic)throw new Error('Low reasoning allocation requires a dependency group');
+ }
+ return plan.map(row=>Object.hasOwn(allocations?.groups??{},row.groupId)?{...row,reasoningEffort:allocations.groups[row.groupId]}:row);
+}
+export function generationReasoningEffort(effort='none'){
+ if(!['none','low'].includes(effort))throw new Error('Invalid generation reasoning effort');return effort;
+}
+export function permitsProfilelessLegacyCache(profile){return profile.reasoningEffort==='none';}
 export function generationOutputLimit(round,allocated){
  const value=allocated??round.plan.limits.maxOutputTokens;
  validateOutputAllocations({default:value},round.plan.limits.maxOutputTokens);
  return value;
 }
 export function meaningModelSettings(profile){return {maxTokens:profile.maxTokens,reasoning:{effort:profile.reasoningEffort},store:false,retry:{maxRetries:0}};}
-export function meaningProfile(kind,maxOutputTokens){
+export function meaningProfile(kind,maxOutputTokens,effort='none'){
+ const reasoningEffort=generationReasoningEffort(effort);if(reasoningEffort==='low'&&kind!=='dependency_group')throw new Error('Low reasoning allocation requires a dependency group');
  const dependencies=JSON.parse(fs.readFileSync(path.join(ROOT,'package.json'),'utf8')).dependencies;
- return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort:'none',maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',ownershipTraceOrigin:'host_projection',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema)};
+ return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort,maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',ownershipTraceOrigin:'host_projection',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema)};
 }
 const stopPath=path.join(ROOT,'.local','api-stop.json');
 export function clearAPIStop(){if(fs.existsSync(stopPath))fs.unlinkSync(stopPath);}
@@ -82,18 +103,19 @@ export async function explain(request,node,children,round,allocation={}){
  if(fs.existsSync(stopPath)){const saved=JSON.parse(fs.readFileSync(stopPath,'utf8'));if(classifyFailure(saved).blocksLuna)throw new APIFailure(saved);fs.renameSync(stopPath,path.join(ROOT,'.local','reclassified-stop-'+Date.now()+'.json'));}
  if(round.plan.stopped)throw new Error('Round stopped after API failure');
  secretCheck(request.input);secretCheck(request.instructions);
- const profile=meaningProfile(node.kind,maxOutputTokens);
+ const profile=meaningProfile(node.kind,maxOutputTokens,allocation.reasoningEffort);
  const outputSchema=node.kind==='dependency_group'?groupOutputSchema:meaningOutputSchema;
  const estimate=encoding.encode(request.instructions+'\n'+request.input+'\n'+JSON.stringify(z.toJSONSchema(outputSchema))).length+256;
  if(estimate>round.plan.limits.maxInputTokens)throw new Error('Input exceeds assigned estimated token limit');
  if(round.plan.calls>=round.plan.limits.maxCalls)throw new Error('Assigned call limit reached');
  let key;try{key=designatedKey();}catch{const failure={status:'auth_blocked',reason:'Designated key unavailable or invalid',at:new Date().toISOString()};round.plan.stopped=true;round.save();fs.writeFileSync(stopPath,JSON.stringify(failure));throw new APIFailure(failure);}setTracingDisabled(true);
  let attempts=0;
- const record={nodeId:node.id,model:MODEL,maxOutputTokens,meaningProfileHash:hash(profile),ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
+ const record={nodeId:node.id,model:MODEL,maxOutputTokens,reasoningEffort:profile.reasoningEffort,meaningProfileHash:hash(profile),ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
  const log=()=>fs.appendFileSync(path.join(round.dir,'calls.jsonl'),JSON.stringify(record)+'\n');
  const client=new OpenAI({apiKey:key,baseURL:'https://api.openai.com/v1',organization:null,project:null,maxRetries:0,timeout:45000,
  fetch:async(url,init)=>{
   if(++attempts>1)throw new Error('No retry permitted');round.plan.calls++;round.save();
+  try{const effort=JSON.parse(init?.body??'{}').reasoning?.effort;if(['none','low'].includes(effort))record.transportReasoningEffort=effort;}catch{}
   const response=await fetch(url,init);record.httpStatus=response.status;
   try{const body=await response.clone().json();
    if(['completed','incomplete','failed','in_progress'].includes(body.status))record.responseStatus=body.status;

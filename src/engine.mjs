@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {ROOT,VERSION,hash,safeSource,analyzeFiles,requestNode} from './parser.mjs';
-import {beginRound,explain,APIFailure,ModelOutputError,meaningProfile,meaningSchema,groupSchema,validateOutputAllocations,generationOutputPlan} from './llm.mjs';
+import {beginRound,explain,APIFailure,ModelOutputError,meaningProfile,meaningSchema,groupSchema,validateOutputAllocations,generationOutputPlan,validateReasoningAllocations,applyReasoningAllocations,permitsProfilelessLegacyCache} from './llm.mjs';
 import * as state from './state.mjs';
 import {resolveRelations} from './relations.mjs';
 import {dependencyGroups} from './dependency-groups.mjs';
@@ -80,12 +80,13 @@ export function requestAnalysis(id,options={}){
  if(!Number.isInteger(maxCalls)||maxCalls<0||maxCalls>24||!Number.isInteger(maxInputTokens)||maxInputTokens<MIN_INPUT_TOKENS||maxInputTokens>MAX_INPUT_TOKENS||!Number.isInteger(maxOutputTokens)||maxOutputTokens<MIN_OUTPUT_TOKENS||maxOutputTokens>MAX_OUTPUT_TOKENS)throw new Error('Analysis budget outside permitted range');
  if(options.nodeIds!==undefined&&(!Array.isArray(options.nodeIds)||options.nodeIds.some(id=>typeof id!=='string'||!id.trim())))throw new Error('nodeIds must be an array of nonempty node identifiers');
  const outputAllocations=validateOutputAllocations(options.outputAllocations,maxOutputTokens);
+ const reasoningAllocations=validateReasoningAllocations(options.reasoningAllocations);
  const existing=state.readJob(id);
  if(existing?.status==='queued'||existing?.status==='running')return existing;
  const lock=state.acquireLock(id);
  const job={jobId:lock.token,jobToken:lock.token,ownerPID:process.pid,ownerStartId:lock.ownerStartId,status:'queued',queuedAt:new Date().toISOString(),processed:0};
  try{state.writeJob(id,job);}catch(error){state.releaseLock(id);throw error;}
- setImmediate(()=>runAnalysis(id,{...options,maxCalls,maxInputTokens,maxOutputTokens,outputAllocations},job));return state.readJob(id);
+ setImmediate(()=>runAnalysis(id,{...options,maxCalls,maxInputTokens,maxOutputTokens,outputAllocations,reasoningAllocations},job));return state.readJob(id);
 }
 export async function waitForJob(id){
  let shared=state.readJob(id);
@@ -167,7 +168,7 @@ async function runAnalysis(id,options,job){
   fs.writeFileSync(path.join(dir,'structure.json'),JSON.stringify({graph,dependencyGroups:groupStructure,selectedNodeIds:[...needed],meanings:{},qualityStatus:graph.diagnostics.length?'stage12_partial_with_diagnostics':'stage12_only',structureComplete:graph.diagnostics.length===0,completedAt:new Date().toISOString()},null,2));
   const promptPath=path.join(ROOT,'experiments/h3.mjs'),promptHash=hash(fs.readFileSync(promptPath,'utf8'));
   const hypothesis=await import(pathToFileURL(promptPath).href+'?version='+promptHash);
-  const generationOutputs=generationOutputPlan(ordered,options.outputAllocations,options.maxOutputTokens);
+  const generationOutputs=applyReasoningAllocations(generationOutputPlan(ordered,options.outputAllocations,options.maxOutputTokens),ordered,options.reasoningAllocations);
   const round=beginRound(job.jobId,{maxCalls:options.maxCalls,maxInputTokens:options.maxInputTokens,maxOutputTokens:options.maxOutputTokens,generationOutputs});
   const meanings={},childVersions={},nodeSettings={},nodeSourceHashes={},meaningSources={},cacheDir=path.join(dir,'cache','h3');fs.mkdirSync(cacheDir,{recursive:true});
   const reused=[],generated=[],cacheMigrations=[],cacheRejected=[];
@@ -187,7 +188,7 @@ async function runAnalysis(id,options,job){
    const normalized=group.cyclic?{id:group.id,kind:'dependency_group',members:group.members.map(requestNode)}:requestNode(group.members[0]);
    const request=group.cyclic?buildGroupRequest(normalized,children,group.members.length>1?{sourceNodes:externalIds.map(childId=>graph.nodes.find(node=>node.id===childId)).filter(Boolean).map(requestNode)}:{}):hypothesis.buildRequest(normalized,children);
    const allocation=generationOutputs.find(row=>row.groupId===group.id);
-   const profile=meaningProfile(normalized.kind,allocation.maxOutputTokens);
+   const profile=meaningProfile(normalized.kind,allocation.maxOutputTokens,allocation.reasoningEffort);
    allocation.meaningProfileHash=hash(profile);allocation.requestHash=hash(request);round.save();
    const identity={request,meaningProfile:profile};
    const cacheKey=hash(identity),requestHash=hash(request),cachePath=path.join(cacheDir,cacheKey+'.json');
@@ -215,7 +216,7 @@ async function runAnalysis(id,options,job){
      cacheMigrations.push({legacyKey:priorKey,cacheKey,memberIds:[...memberIds],proof:'exact_request_and_profile_hash'});break;
     }
    }
-   if(!meaning&&previous?.settingsHash){
+   if(!meaning&&previous?.settingsHash&&permitsProfilelessLegacyCache(profile)){
     // The old key is reconstructed from this exact request, never found by ID or glob.
     const legacyKey=hash({request,model:'gpt-6-luna',parserVersion:VERSION,promptHash,maxOutputTokens:allocation.maxOutputTokens,conditions:previous.settingsHash});
     meaning=loadCompatible(path.join(cacheDir,legacyKey+'.json'),legacyKey);
@@ -228,7 +229,7 @@ async function runAnalysis(id,options,job){
    else{
     if(round.plan.calls>=options.maxCalls)throw new Error('Meaning generation requires additional allocated calls; old successful snapshot preserved');
     state.assertLockOwner(id,job.jobToken);
-    meaning=validateCachedMeaning(await explain(request,normalized,children,round,{maxOutputTokens:allocation.maxOutputTokens}),normalized,children);
+    meaning=validateCachedMeaning(await explain(request,normalized,children,round,{maxOutputTokens:allocation.maxOutputTokens,reasoningEffort:allocation.reasoningEffort}),normalized,children);
     fs.writeFileSync(cachePath,JSON.stringify({cacheKey,requestHash,meaningProfile:profile,meaning,audit:{promptHash,parserVersion:VERSION,analysisConditions:analysisSettings,runtimeFingerprint}},null,2));generated.push(...memberIds);allocation.status='generated';round.save();
    }
    if(group.cyclic)for(const member of meaning.members){const source=group.members.find(n=>n.id===member.id);meanings[member.id]={...member,name:source.name};}

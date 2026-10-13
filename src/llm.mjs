@@ -1,3 +1,4 @@
+import {MIN_OUTPUT_TOKENS,MAX_OUTPUT_TOKENS} from './analysis-budget.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import OpenAI from 'openai';
@@ -23,6 +24,31 @@ export function deriveMeaningOwnership(payload,kind){
 
 const encoding=getEncoding('o200k_base');
 const MODEL='gpt-6-luna';
+export function validateOutputAllocations(allocations,ceiling){
+ if(!Number.isInteger(ceiling)||ceiling<MIN_OUTPUT_TOKENS||ceiling>MAX_OUTPUT_TOKENS)throw new Error('Generation output ceiling outside permitted range');
+ const token=value=>{if(!Number.isInteger(value)||value<MIN_OUTPUT_TOKENS||value>MAX_OUTPUT_TOKENS||value>ceiling)throw new Error('Generation output allocation outside permitted range');return value;};
+ if(allocations===undefined)return undefined;
+ if(!allocations||typeof allocations!=='object'||Array.isArray(allocations)||Object.keys(allocations).some(key=>!['default','groups'].includes(key)))throw new Error('Invalid generation output allocations');
+ const result={};
+ if(allocations.default!==undefined)result.default=token(allocations.default);
+ for(const kind of ['groups'])if(allocations[kind]!==undefined){const rows=allocations[kind];if(!rows||typeof rows!=='object'||Array.isArray(rows))throw new Error('Invalid generation output allocation map');result[kind]=Object.fromEntries(Object.entries(rows).map(([id,value])=>{if(!id.trim())throw new Error('Empty generation output allocation ID');return[id,token(value)];}));}
+ return result;
+}
+export function generationOutputPlan(groups,allocations,ceiling){
+ allocations=validateOutputAllocations(allocations,ceiling);
+ const groupIds=new Set(groups.map(group=>group.id));
+ if(Object.keys(allocations?.groups??{}).some(id=>!groupIds.has(id)))throw new Error('Generation output allocation ID outside selected dependency scope');
+ return groups.map(group=>{
+  const override=allocations?.groups&&Object.hasOwn(allocations.groups,group.id)?allocations.groups[group.id]:undefined;
+  return {groupId:group.id,memberIds:group.members.map(node=>node.id),maxOutputTokens:override??allocations?.default??ceiling,status:'pending'};
+ });
+}
+export function generationOutputLimit(round,allocated){
+ const value=allocated??round.plan.limits.maxOutputTokens;
+ validateOutputAllocations({default:value},round.plan.limits.maxOutputTokens);
+ return value;
+}
+export function meaningModelSettings(profile){return {maxTokens:profile.maxTokens,reasoning:{effort:profile.reasoningEffort},store:false,retry:{maxRetries:0}};}
 export function meaningProfile(kind,maxOutputTokens){
  const dependencies=JSON.parse(fs.readFileSync(path.join(ROOT,'package.json'),'utf8')).dependencies;
  return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort:'none',maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',ownershipTraceOrigin:'host_projection',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema)};
@@ -44,24 +70,26 @@ function designatedKey(){
  if(!key||/\s/.test(key))throw new Error('Invalid key format');return key;
 }
 export function beginRound(id,options={}){
- const limits={maxCalls:6,maxInputTokens:3000,maxOutputTokens:1000,...options};
+ const {generationOutputs,...budgets}=options;
+ const limits={maxCalls:6,maxInputTokens:3000,maxOutputTokens:1000,...budgets};
  const dir=path.join(ROOT,'.local','rounds',id);fs.mkdirSync(dir,{recursive:true});
- const plan={id,startedAt:new Date().toISOString(),model:MODEL,limits,pricing:{input:0.1,cachedInput:0.01,cacheWrite:0.125,output:0.5,unit:'USD per million',source:'https://developers.openai.com/api/docs/models/gpt-6-luna'},calls:0,stopped:false};
+ const plan={id,startedAt:new Date().toISOString(),model:MODEL,limits,pricing:{input:0.1,cachedInput:0.01,cacheWrite:0.125,output:0.5,unit:'USD per million',source:'https://developers.openai.com/api/docs/models/gpt-6-luna'},calls:0,stopped:false,...(generationOutputs===undefined?{}:{generationOutputs})};
  const save=()=>fs.writeFileSync(path.join(dir,'budget.json'),JSON.stringify(plan,null,2));save();
  return {dir,plan,save};
 }
-export async function explain(request,node,children,round){
+export async function explain(request,node,children,round,allocation={}){
+ const maxOutputTokens=generationOutputLimit(round,allocation.maxOutputTokens);
  if(fs.existsSync(stopPath)){const saved=JSON.parse(fs.readFileSync(stopPath,'utf8'));if(classifyFailure(saved).blocksLuna)throw new APIFailure(saved);fs.renameSync(stopPath,path.join(ROOT,'.local','reclassified-stop-'+Date.now()+'.json'));}
  if(round.plan.stopped)throw new Error('Round stopped after API failure');
  secretCheck(request.input);secretCheck(request.instructions);
- const profile=meaningProfile(node.kind,round.plan.limits.maxOutputTokens);
+ const profile=meaningProfile(node.kind,maxOutputTokens);
  const outputSchema=node.kind==='dependency_group'?groupOutputSchema:meaningOutputSchema;
  const estimate=encoding.encode(request.instructions+'\n'+request.input+'\n'+JSON.stringify(z.toJSONSchema(outputSchema))).length+256;
  if(estimate>round.plan.limits.maxInputTokens)throw new Error('Input exceeds assigned estimated token limit');
  if(round.plan.calls>=round.plan.limits.maxCalls)throw new Error('Assigned call limit reached');
  let key;try{key=designatedKey();}catch{const failure={status:'auth_blocked',reason:'Designated key unavailable or invalid',at:new Date().toISOString()};round.plan.stopped=true;round.save();fs.writeFileSync(stopPath,JSON.stringify(failure));throw new APIFailure(failure);}setTracingDisabled(true);
  let attempts=0;
- const record={nodeId:node.id,model:MODEL,ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
+ const record={nodeId:node.id,model:MODEL,maxOutputTokens,meaningProfileHash:hash(profile),ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
  const log=()=>fs.appendFileSync(path.join(round.dir,'calls.jsonl'),JSON.stringify(record)+'\n');
  const client=new OpenAI({apiKey:key,baseURL:'https://api.openai.com/v1',organization:null,project:null,maxRetries:0,timeout:45000,
  fetch:async(url,init)=>{
@@ -76,7 +104,7 @@ export async function explain(request,node,children,round){
   return response;
  }});
  const model=new OpenAIResponsesModel(client,MODEL);
- const agent=new Agent({name:'Phonon meaning',model,instructions:request.instructions,outputType:outputSchema,modelSettings:{maxTokens:profile.maxTokens,reasoning:{effort:profile.reasoningEffort},store:false,retry:{maxRetries:0}}});
+ const agent=new Agent({name:'Phonon meaning',model,instructions:request.instructions,outputType:outputSchema,modelSettings:meaningModelSettings(profile)});
  const runner=new Runner({model,tracingDisabled:true,traceIncludeSensitiveData:false});
  let result;
  try{result=await runner.run(agent,request.input,{maxTurns:profile.maxTurns});}

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {ROOT,VERSION,hash,safeSource,analyzeFiles,requestNode} from './parser.mjs';
-import {beginRound,explain,APIFailure,ModelOutputError,meaningProfile,meaningSchema,groupSchema} from './llm.mjs';
+import {beginRound,explain,APIFailure,ModelOutputError,meaningProfile,meaningSchema,groupSchema,validateOutputAllocations,generationOutputPlan} from './llm.mjs';
 import * as state from './state.mjs';
 import {resolveRelations} from './relations.mjs';
 import {dependencyGroups} from './dependency-groups.mjs';
@@ -79,12 +79,13 @@ export function requestAnalysis(id,options={}){
  const maxCalls=options.maxCalls??0,maxInputTokens=options.maxInputTokens??DEFAULT_INPUT_TOKENS,maxOutputTokens=options.maxOutputTokens??DEFAULT_OUTPUT_TOKENS;
  if(!Number.isInteger(maxCalls)||maxCalls<0||maxCalls>24||!Number.isInteger(maxInputTokens)||maxInputTokens<MIN_INPUT_TOKENS||maxInputTokens>MAX_INPUT_TOKENS||!Number.isInteger(maxOutputTokens)||maxOutputTokens<MIN_OUTPUT_TOKENS||maxOutputTokens>MAX_OUTPUT_TOKENS)throw new Error('Analysis budget outside permitted range');
  if(options.nodeIds!==undefined&&(!Array.isArray(options.nodeIds)||options.nodeIds.some(id=>typeof id!=='string'||!id.trim())))throw new Error('nodeIds must be an array of nonempty node identifiers');
+ const outputAllocations=validateOutputAllocations(options.outputAllocations,maxOutputTokens);
  const existing=state.readJob(id);
  if(existing?.status==='queued'||existing?.status==='running')return existing;
  const lock=state.acquireLock(id);
  const job={jobId:lock.token,jobToken:lock.token,ownerPID:process.pid,ownerStartId:lock.ownerStartId,status:'queued',queuedAt:new Date().toISOString(),processed:0};
  try{state.writeJob(id,job);}catch(error){state.releaseLock(id);throw error;}
- setImmediate(()=>runAnalysis(id,{...options,maxCalls,maxInputTokens,maxOutputTokens},job));return state.readJob(id);
+ setImmediate(()=>runAnalysis(id,{...options,maxCalls,maxInputTokens,maxOutputTokens,outputAllocations},job));return state.readJob(id);
 }
 export async function waitForJob(id){
  let shared=state.readJob(id);
@@ -166,7 +167,8 @@ async function runAnalysis(id,options,job){
   fs.writeFileSync(path.join(dir,'structure.json'),JSON.stringify({graph,dependencyGroups:groupStructure,selectedNodeIds:[...needed],meanings:{},qualityStatus:graph.diagnostics.length?'stage12_partial_with_diagnostics':'stage12_only',structureComplete:graph.diagnostics.length===0,completedAt:new Date().toISOString()},null,2));
   const promptPath=path.join(ROOT,'experiments/h3.mjs'),promptHash=hash(fs.readFileSync(promptPath,'utf8'));
   const hypothesis=await import(pathToFileURL(promptPath).href+'?version='+promptHash);
-  const round=beginRound(job.jobId,{maxCalls:options.maxCalls,maxInputTokens:options.maxInputTokens,maxOutputTokens:options.maxOutputTokens});
+  const generationOutputs=generationOutputPlan(ordered,options.outputAllocations,options.maxOutputTokens);
+  const round=beginRound(job.jobId,{maxCalls:options.maxCalls,maxInputTokens:options.maxInputTokens,maxOutputTokens:options.maxOutputTokens,generationOutputs});
   const meanings={},childVersions={},nodeSettings={},nodeSourceHashes={},meaningSources={},cacheDir=path.join(dir,'cache','h3');fs.mkdirSync(cacheDir,{recursive:true});
   const reused=[],generated=[],cacheMigrations=[],cacheRejected=[];
   const previousNodes=new Map((previous?.graph?.nodes??[]).map(node=>[node.id,node]));
@@ -184,7 +186,9 @@ async function runAnalysis(id,options,job){
    if(children.some(c=>!c))throw new Error('Confirmed child meaning unavailable');
    const normalized=group.cyclic?{id:group.id,kind:'dependency_group',members:group.members.map(requestNode)}:requestNode(group.members[0]);
    const request=group.cyclic?buildGroupRequest(normalized,children):hypothesis.buildRequest(normalized,children);
-   const profile=meaningProfile(normalized.kind,options.maxOutputTokens);
+   const allocation=generationOutputs.find(row=>row.groupId===group.id);
+   const profile=meaningProfile(normalized.kind,allocation.maxOutputTokens);
+   allocation.meaningProfileHash=hash(profile);round.save();
    const identity={request,meaningProfile:profile};
    const cacheKey=hash(identity),requestHash=hash(request),cachePath=path.join(cacheDir,cacheKey+'.json');
    let meaning;
@@ -213,19 +217,19 @@ async function runAnalysis(id,options,job){
    }
    if(!meaning&&previous?.settingsHash){
     // The old key is reconstructed from this exact request, never found by ID or glob.
-    const legacyKey=hash({request,model:'gpt-6-luna',parserVersion:VERSION,promptHash,maxOutputTokens:options.maxOutputTokens,conditions:previous.settingsHash});
+    const legacyKey=hash({request,model:'gpt-6-luna',parserVersion:VERSION,promptHash,maxOutputTokens:allocation.maxOutputTokens,conditions:previous.settingsHash});
     meaning=loadCompatible(path.join(cacheDir,legacyKey+'.json'),legacyKey);
     if(meaning){
      fs.writeFileSync(cachePath,JSON.stringify({cacheKey,requestHash,meaningProfile:profile,meaning,migratedFrom:legacyKey,audit:{promptHash,parserVersion:VERSION,analysisConditions:analysisSettings,runtimeFingerprint}},null,2));
      cacheMigrations.push({legacyKey,cacheKey,memberIds:[...memberIds]});
     }
    }
-   if(meaning)reused.push(...memberIds);
+   if(meaning){reused.push(...memberIds);allocation.status='reused';round.save();}
    else{
     if(round.plan.calls>=options.maxCalls)throw new Error('Meaning generation requires additional allocated calls; old successful snapshot preserved');
     state.assertLockOwner(id,job.jobToken);
-    meaning=validateCachedMeaning(await explain(request,normalized,children,round),normalized,children);
-    fs.writeFileSync(cachePath,JSON.stringify({cacheKey,requestHash,meaningProfile:profile,meaning,audit:{promptHash,parserVersion:VERSION,analysisConditions:analysisSettings,runtimeFingerprint}},null,2));generated.push(...memberIds);
+    meaning=validateCachedMeaning(await explain(request,normalized,children,round,{maxOutputTokens:allocation.maxOutputTokens}),normalized,children);
+    fs.writeFileSync(cachePath,JSON.stringify({cacheKey,requestHash,meaningProfile:profile,meaning,audit:{promptHash,parserVersion:VERSION,analysisConditions:analysisSettings,runtimeFingerprint}},null,2));generated.push(...memberIds);allocation.status='generated';round.save();
    }
    if(group.cyclic)for(const member of meaning.members){const source=group.members.find(n=>n.id===member.id);meanings[member.id]={...member,name:source.name};}
    else meanings[group.members[0].id]=meaning;
@@ -248,7 +252,7 @@ async function runAnalysis(id,options,job){
     meaningSources[old.id]=previous.meaningSources?.[old.id]??{file:old.file,source:old.source,lineMap:old.lineMap};
    }
   }
-  const snapshot={graph,dependencyGroups:groupStructure,meanings,childVersions,nodeSettings,nodeSourceHashes,meaningSources,staleRetainedNodeIds,settingsHash:analysisSettings,runtimeFingerprint,completedAt:new Date().toISOString(),scope:partial?'partial_with_forward_dependencies_and_reverse_impact':'whole_within_current_limits',requestedFiles:scopeFiles,requestedNodeIds,analyzedNodeIds:[...needed],qualityStatus:'generated_review_required',structureComplete:graph.diagnostics.length===0,reused,generated,cacheMigrations,cacheRejected,roundId:job.jobId};
+  const snapshot={graph,dependencyGroups:groupStructure,meanings,childVersions,nodeSettings,nodeSourceHashes,meaningSources,staleRetainedNodeIds,settingsHash:analysisSettings,runtimeFingerprint,completedAt:new Date().toISOString(),scope:partial?'partial_with_forward_dependencies_and_reverse_impact':'whole_within_current_limits',requestedFiles:scopeFiles,requestedNodeIds,analyzedNodeIds:[...needed],qualityStatus:'generated_review_required',structureComplete:graph.diagnostics.length===0,reused,generated,cacheMigrations,cacheRejected,generationOutputs,roundId:job.jobId};
   assertRuntimeConditions();
   if(settings()!==analysisSettings)throw new Error('Analysis conditions changed during execution; previous successful snapshot preserved');
   state.assertLockOwner(id,job.jobToken);state.writeLatest(id,snapshot);job.status='completed';job.reused=reused.length;job.generated=generated.length;job.qualityStatus=snapshot.qualityStatus;job.cacheMigrations=cacheMigrations.length;job.cacheRejected=cacheRejected.length;

@@ -2,7 +2,7 @@ import {pythonModuleStateReads,pythonInputRoleHints,pythonInputRoleInstructions}
 /** H3: one-pass claim ownership ledger. No I/O or model calls. */
 export const hypothesis = Object.freeze({
   id: 'h3',
-  version: 27,
+  version: 28,
   name: 'Ownership ledger with single-pass owner checks',
   strategy: 'Separate local evidence from child-owned claims; check ownership internally in the same response; host projects the trace.'
 });
@@ -84,6 +84,16 @@ export function buildRequest(node, children = []) {
     throw new TypeError('H3 child ids must be unique');
   }
 
+  const completedChildIds=new Set(list(children).filter(child=>child&&['input','process','output','uncertainty'].every(section=>Array.isArray(child[section])&&child[section].every(text=>typeof text==='string'))).map(child=>printable(child.id)));
+  const checklist=list(node.standardCollectionChecklist),callbackOwnershipBoundaries=[];
+  for(const [checklistIndex,check]of checklist.entries()){
+    const site=check?.callback,start=node.startLine??1,end=node.endLine??(start+printable(node.source).split(/\r?\n/).length-1);
+    if(!Number.isInteger(site?.line)||!Number.isInteger(site?.endLine)||site.line<start||site.endLine<site.line||site.endLine>end)continue;
+    if(checklist.filter(other=>other?.callback?.line===site.line).length!==1)continue;
+    const refs=list(node.references).filter(ref=>ref?.kind==='callback_definition'&&ref.relationship==='lexical_definition'&&ref.invocation===false&&ref.line===site.line&&typeof ref.targetId==='string'&&ref.targetId!==nodeId&&completedChildIds.has(ref.targetId));
+    if(refs.length!==1)continue;
+    callbackOwnershipBoundaries.push({checklistIndex,childId:refs[0].targetId,callbackSite:{line:site.line,endLine:site.endLine},relationship:refs[0].relationship,invocation:refs[0].invocation});
+  }
   const moduleStateReads = pythonModuleStateReads(node);
   const inputRoleHints = pythonInputRoleHints(node, children);
   const localLedger = {
@@ -102,6 +112,7 @@ export function buildRequest(node, children = []) {
     referenceSites: list(node.references),
     externalContracts: list(node.externalContracts),
     ...(list(node.standardCollectionChecklist).length ? {standardCollectionChecklist:list(node.standardCollectionChecklist)} : {}),
+    ...(callbackOwnershipBoundaries.length ? {callbackOwnershipBoundaries} : {}),
     ...(list(node.localLiteralGuardChecklist).length ? {localLiteralGuardChecklist:node.localLiteralGuardChecklist} : {}),
     ...(list(node.jsxPropChecklist).length ? {jsxPropChecklist:node.jsxPropChecklist} : {}),
     ...(list(node.writeChecklist).length ? {writeChecklist:node.writeChecklist} : {}),
@@ -436,7 +447,7 @@ UNIQUE/PRIMARY KEY groups, full CHECK predicates/literal sets and ordered FOREIG
 Declarations, IF NOT EXISTS and conditional inserts do not prove existing schema/success. Cite rows;
 never duplicate the AST or invent nullable flags/current values. Keep concrete per-table contract
 lists concise without dropping constraints or repeating evidence. SQL/code lists also need a meaningful Korean contract label/verb in EACH prose item; pure ASCII
-lists are not prose. Preserve raw literals/identifiers; no translation/prefix repair or extra pass.` : '') + (list(node.standardCollectionChecklist).length ? '\n\n'+"Source-proven conditional standard collections:\nstandardCollectionChecklist records an unshadowed direct Set construction, declared array receiver\nand direct some callback using that same captured Set. Assuming actual values satisfy the declared\narray contract and standard Set/Array methods/prototypes have not been replaced, explain the current\noperation as a Boolean test for at least one common value, ending at the first truthy membership\nresult; otherwise false. Preserve the actual empty-input guard. Type annotations are not runtime\nvalidation. Do not apply this rule to custom/shadowed/aliased/reassigned receivers or methods.\nKeep unsupported runtime behavior uncertain, without erasing this conditional source responsibility.\nA separate callback owns its exact formula; do not copy its internals or invent an invocation edge.\nConditional collection OUTPUT ownership:\nOUTPUT states the Boolean common-value result and actual early false boundary; do not quote a\ncomplete some expression containing an inline callback body or repeat that callback's exact formula.\nPROCESS retains current Set construction and some/result-use responsibility; the callback remains\nits own minimal responsibility reference. Keep all source/callback data, conditional standard-method\nassumptions and unknown runtime constraints; no extra edge, schema relaxation or repair is implied." : '') + (Object.keys(inputRoleHints).length ? '\n\n'+pythonInputRoleInstructions : '') + '\n최종 언어 확인: 이 응답 안에서 모든 설명 필드의 문장이 한국어인지 확인한 뒤 확정하세요. 원문 코드·문자열·식별자는 그대로 유지하고, 추가 모델 호출이나 출력 후 번역 수리는 하지 마세요.',
+lists are not prose. Preserve raw literals/identifiers; no translation/prefix repair or extra pass.` : '') + (list(node.standardCollectionChecklist).length ? '\n\n'+"Source-proven conditional standard collections:\nstandardCollectionChecklist records an unshadowed direct Set construction, declared array receiver\nand direct some callback using that same captured Set. Assuming actual values satisfy the declared\narray contract and standard Set/Array methods/prototypes have not been replaced, explain the current\noperation as a Boolean test for at least one common value, ending at the first truthy membership\nresult; otherwise false. Preserve the actual empty-input guard. Type annotations are not runtime\nvalidation. Do not apply this rule to custom/shadowed/aliased/reassigned receivers or methods.\nKeep unsupported runtime behavior uncertain, without erasing this conditional source responsibility.\nA separate callback owns its exact formula; do not copy its internals or invent an invocation edge.\nConditional collection OUTPUT ownership:\nOUTPUT states the Boolean common-value result and actual early false boundary; do not quote a\ncomplete some expression containing an inline callback body or repeat that callback's exact formula.\nPROCESS retains current Set construction and some/result-use responsibility; the callback remains\nits own minimal responsibility reference. Keep all source/callback data, conditional standard-method\nassumptions and unknown runtime constraints; no extra edge, schema relaxation or repair is implied." : '') + (callbackOwnershipBoundaries.length ? '\n\n'+"Callback ownership boundary attention:\ncallbackOwnershipBoundaries links one checklist callback site to one existing lexical definition\nreference and completed child contract. It is an ownership pointer, not an invocation edge or quality\nguarantee. Raw full call/callback source is evidence DATA: appearing inside a caller expression does\nnot make its nested callback body caller-owned. In current INPUT, PROCESS, OUTPUT, childUses and\nevidence claims, never quote the child body or the complete call expression containing it. Retain\ncurrent guards/early returns IF actually present, current Set construction, some use and conditional\nshort-circuit/result role; do not invent a guard. Reference the child's minimal responsibility and\ncurrent result use without its formula. Cite the current call/definition site for that use. All exact\nsource, callback/checklist data, full child IPO/uncertainty and existing assumptions remain supplied.\nAbsent or ambiguous matching provides no ownership pointer; never infer another owner or new edge." : '') + (Object.keys(inputRoleHints).length ? '\n\n'+pythonInputRoleInstructions : '') + '\n최종 언어 확인: 이 응답 안에서 모든 설명 필드의 문장이 한국어인지 확인한 뒤 확정하세요. 원문 코드·문자열·식별자는 그대로 유지하고, 추가 모델 호출이나 출력 후 번역 수리는 하지 마세요.',
     input: JSON.stringify({
       strategy: hypothesis.id,
       currentNodeId: nodeId,

@@ -175,13 +175,32 @@ Do not accept ownerChecks as a correctness guarantee. All explanation text in in
   return request;
 }
 
-export function validateGroupMeaning(payload, group, externalChildren = []) {
+export function buildFocusedGroupRequest(group, externalChildren = [], options = {}) {
+ const {members}=context(group,externalChildren),focusMemberId=options.focusMemberId;
+ if(group.kind!=='dependency_group'||members.size<2||typeof focusMemberId!=='string'||!members.has(focusMemberId))fail('focused member must belong to full dependency group');
+ const joint=buildGroupRequest(group,externalChildren,options),data=JSON.parse(joint.input);
+ data.outputMemberIds=[focusMemberId];data.outputMemberCount=1;data.focusMemberId=focusMemberId;
+ const replacements=[[
+'are derived ONLY from memberLedgers. members MUST contain exactly that many entries, each listed id',
+'are the selected output boundary within the FULL memberLedgers context. members MUST contain exactly that many entries, each listed id'],[
+'Within this same response, compare EACH delegation row with its target member OUTPUT: preserve\nevery evidenced shared-state target identifier and effect kind in caller OUTPUT conditionally.',
+'For the requested focusMemberId, use every relevant delegation row and supplied source-backed target role to preserve conditional shared-state OUTPUT. Other context members have no output in this response; do not claim their meanings were pre-completed.'],[
+'Before finalizing, ensure all member ids, actual confirmed',
+'Before finalizing, ensure all requested output member ids, actual confirmed']];
+ let instructions=joint.instructions;for(const [from,to]of replacements){if(instructions.split(from).length!==2)fail('focused instruction boundary unavailable');instructions=instructions.replace(from,to);}
+ instructions+='\n\n'+"Focused member response: explain ONLY focusMemberId, returning exactly that member under the original groupId. All supplied member source ledgers remain ownership/recursion context, not requested outputs. Keep its full confirmed internal/external child coverage, source/role contracts, INPUT/PROCESS/OUTPUT/uncertainty/evidence criteria. No sibling placeholders or copied implementations; no inferred runtime success.";
+ return {instructions,input:JSON.stringify(data)};
+}
+
+function validateMemberSet(payload, group, externalChildren, outputIds) {
   const {members, required} = context(group, externalChildren);
   if (!record(payload) || payload.id !== group.id || !Array.isArray(payload.members)) fail('top-level id or members mismatch');
-  if (payload.members.length !== members.size) fail('member count mismatch');
+  if (outputIds.some(id=>!members.has(id))||new Set(outputIds).size!==outputIds.length)fail('invalid requested member set');
+  const requested=new Set(outputIds);
+  if (payload.members.length !== requested.size) fail('member count mismatch');
   const validated = new Map();
   for (const meaning of payload.members) {
-    if (!record(meaning) || !members.has(meaning.id) || validated.has(meaning.id)) fail('unknown or duplicate member id');
+    if (!record(meaning) || !requested.has(meaning.id) || validated.has(meaning.id)) fail('unknown or duplicate member id');
     for (const section of ['input', 'process', 'output', 'uncertainty']) textArray(meaning[section], section);
     if (!Array.isArray(meaning.childUses)) fail('childUses must be an array');
     const expected = new Set(required.get(meaning.id)), actual = new Set();
@@ -211,5 +230,13 @@ export function validateGroupMeaning(payload, group, externalChildren = []) {
     }
     validated.set(meaning.id, meaning);
   }
-  return group.members.map(member => validated.get(member.id));
+  return outputIds.map(id => validated.get(id));
+}
+
+export function validateGroupMeaning(payload, group, externalChildren = []) {
+ return validateMemberSet(payload,group,externalChildren,(group.members??[]).map(member=>member.id));
+}
+export function validateFocusedGroupMeaning(payload, group, externalChildren = [], focusMemberId) {
+ if(typeof focusMemberId!=='string'||!focusMemberId)fail('focused member id required');
+ return validateMemberSet(payload,group,externalChildren,[focusMemberId]);
 }

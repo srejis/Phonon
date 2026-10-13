@@ -7,7 +7,7 @@ import {getEncoding} from 'js-tiktoken';
 import {z} from 'zod';
 import {ROOT,hash} from './parser.mjs';
 import {classifyFailure} from './failure-policy.mjs';
-import {validateGroupMeaning} from './group-meaning.mjs';
+import {validateGroupMeaning,validateFocusedGroupMeaning} from './group-meaning.mjs';
 import {validateMeaningLanguage} from './meaning-language.mjs';
 export const meaningSchema=z.object({id:z.string(),input:z.array(z.string()),process:z.array(z.string()),output:z.array(z.string()),childUses:z.array(z.object({childId:z.string(),description:z.string()}).strict()),uncertainty:z.array(z.string()),evidence:z.array(z.object({line:z.number().int(),claim:z.string()}).strict()),ownerChecks:z.array(z.object({section:z.enum(['input','process','output','childUses']),index:z.number().int().nonnegative(),ownerId:z.string()}).strict())}).strict();
 const schema=meaningSchema;
@@ -69,10 +69,11 @@ export function generationOutputLimit(round,allocated){
  return value;
 }
 export function meaningModelSettings(profile){return {maxTokens:profile.maxTokens,reasoning:{effort:profile.reasoningEffort},store:false,retry:{maxRetries:0}};}
-export function meaningProfile(kind,maxOutputTokens,effort='none'){
+export function meaningProfile(kind,maxOutputTokens,effort='none',focus){
  const reasoningEffort=generationReasoningEffort(effort);if(reasoningEffort==='low'&&kind!=='dependency_group')throw new Error('Low reasoning allocation requires a dependency group');
+ if(focus!==undefined&&(kind!=='dependency_group'||!focus||typeof focus!=='object'||Array.isArray(focus)||Object.keys(focus).some(key=>!['focusMemberId','contextGroupId','inputContextHash'].includes(key))||typeof focus.focusMemberId!=='string'||!focus.focusMemberId.trim()||typeof focus.contextGroupId!=='string'||!focus.contextGroupId.trim()||! /^[a-f0-9]{64}$/.test(focus.inputContextHash??'')))throw new Error('Invalid focused generation profile');
  const dependencies=JSON.parse(fs.readFileSync(path.join(ROOT,'package.json'),'utf8')).dependencies;
- return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort,maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',ownershipTraceOrigin:'host_projection',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema)};
+ return {model:MODEL,agentsSDK:dependencies['@openai/agents'],openaiSDK:dependencies.openai,reasoningEffort,maxTurns:1,maxTokens:maxOutputTokens,outputFormat:'strict_json_schema',ownershipTraceOrigin:'host_projection',jsonSchema:z.toJSONSchema(kind==='dependency_group'?groupOutputSchema:meaningOutputSchema),...(focus===undefined?{}:{outputBoundary:'member_focused_v1',...focus})};
 }
 const stopPath=path.join(ROOT,'.local','api-stop.json');
 export function clearAPIStop(){if(fs.existsSync(stopPath))fs.unlinkSync(stopPath);}
@@ -103,14 +104,20 @@ export async function explain(request,node,children,round,allocation={}){
  if(fs.existsSync(stopPath)){const saved=JSON.parse(fs.readFileSync(stopPath,'utf8'));if(classifyFailure(saved).blocksLuna)throw new APIFailure(saved);fs.renameSync(stopPath,path.join(ROOT,'.local','reclassified-stop-'+Date.now()+'.json'));}
  if(round.plan.stopped)throw new Error('Round stopped after API failure');
  secretCheck(request.input);secretCheck(request.instructions);
- const profile=meaningProfile(node.kind,maxOutputTokens,allocation.reasoningEffort);
+ const focusMemberId=allocation.focusMemberId;let focus;
+ if(focusMemberId!==undefined){
+  if(node.kind!=='dependency_group'||typeof focusMemberId!=='string'||!node.members?.some(member=>member.id===focusMemberId))throw new Error('Focused member outside full group');
+  const data=JSON.parse(request.input);if(data.groupId!==node.id||data.focusMemberId!==focusMemberId||data.outputMemberCount!==1||JSON.stringify(data.outputMemberIds)!==JSON.stringify([focusMemberId])||JSON.stringify(data.memberLedgers?.map(member=>member.id))!==JSON.stringify(node.members.map(member=>member.id)))throw new Error('Focused request boundary mismatch');
+  focus={focusMemberId,contextGroupId:node.id,inputContextHash:hash(request.input)};
+ }
+ const profile=meaningProfile(node.kind,maxOutputTokens,allocation.reasoningEffort,focus);
  const outputSchema=node.kind==='dependency_group'?groupOutputSchema:meaningOutputSchema;
  const estimate=encoding.encode(request.instructions+'\n'+request.input+'\n'+JSON.stringify(z.toJSONSchema(outputSchema))).length+256;
  if(estimate>round.plan.limits.maxInputTokens)throw new Error('Input exceeds assigned estimated token limit');
  if(round.plan.calls>=round.plan.limits.maxCalls)throw new Error('Assigned call limit reached');
  let key;try{key=designatedKey();}catch{const failure={status:'auth_blocked',reason:'Designated key unavailable or invalid',at:new Date().toISOString()};round.plan.stopped=true;round.save();fs.writeFileSync(stopPath,JSON.stringify(failure));throw new APIFailure(failure);}setTracingDisabled(true);
  let attempts=0;
- const record={nodeId:node.id,model:MODEL,maxOutputTokens,reasoningEffort:profile.reasoningEffort,meaningProfileHash:hash(profile),ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
+ const record={nodeId:node.id,model:MODEL,maxOutputTokens,reasoningEffort:profile.reasoningEffort,...(focus===undefined?{}:{outputBoundary:profile.outputBoundary,...focus}),meaningProfileHash:hash(profile),ownerChecksOrigin:'host_projection',startedAt:new Date().toISOString(),estimatedInputTokens:estimate,inputHash:hash(request),childVersions:children.map(c=>({id:c.id,meaningHash:hash(c)}))};
  const log=()=>fs.appendFileSync(path.join(round.dir,'calls.jsonl'),JSON.stringify(record)+'\n');
  const client=new OpenAI({apiKey:key,baseURL:'https://api.openai.com/v1',organization:null,project:null,maxRetries:0,timeout:45000,
  fetch:async(url,init)=>{
@@ -148,7 +155,7 @@ export async function explain(request,node,children,round,allocation={}){
  try{
   const payload=JSON.parse(text);
   const canonical=deriveMeaningOwnership(payload,node.kind);
-  const meaning=node.kind==='dependency_group'?{id:canonical.id,members:validateGroupMeaning(canonical,node,children)}:schema.parse(canonical);
+  const meaning=node.kind==='dependency_group'?{id:canonical.id,members:focus===undefined?validateGroupMeaning(canonical,node,children):validateFocusedGroupMeaning(canonical,node,children,focusMemberId)}:schema.parse(canonical);
   if(meaning.id!==node.id)throw new Error('Node ID mismatch');
   if(node.kind!=='dependency_group'){
   const expected=new Set(children.map(c=>c.id));
